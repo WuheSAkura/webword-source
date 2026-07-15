@@ -1,0 +1,32 @@
+# Docker 镜像导出文件
+webword-*.tar
+webword-*.zip
+
+# 前端依赖与构建产物
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Python 缓存与本地虚拟环境
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 运行时生成的数据
+backend/temp/
+backend/static/
+*.log
+
+# 本地环境配置
+.env
+.env.*
+!.env.example
+
+# IDE 与操作系统文件
+.idea/
+.vscode/
+.DS_Store
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

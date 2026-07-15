@@ -1,0 +1,14 @@
+services:
+  webword:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: webword
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - webword-temp:/app/backend/temp
+
+volumes:
+  webword-temp:

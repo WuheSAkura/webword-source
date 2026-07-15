@@ -1,0 +1,54 @@
+# ── 党政机关公文格式参数（唯一参数源）──
+# 所有格式参数集中于此，改一处即可全局生效。
+# 字号换算（pt）：二号22 三号16 小三15 四号14 小四12 五号10.5
+
+fonts:
+  # 中文字体缺字时的回退顺序（最终渲染取决于打开文档机器是否装有对应字库）
+  cn_fallback:
+    title:      ["方正小标宋简体", "FZXiaoBiaoSong-B05S", "宋体", "SimSun"]
+    fangsong:   ["仿宋_GB2312", "仿宋", "FangSong_GB2312", "FangSong"]
+    kaiti:      ["楷体_GB2312", "楷体", "KaiTi_GB2312", "KaiTi"]
+    heiti:      ["黑体", "SimHei"]
+    songti:     ["宋体", "SimSun"]
+  en: "Times New Roman"
+
+page:
+  width_cm: 21.0
+  height_cm: 29.7
+  margin_cm: { top: 3.7, bottom: 3.5, left: 2.8, right: 2.6 }
+  header_cm: 0
+  footer_cm: 2.5
+
+spacing:
+  body_line_pt: 28        # 正文/标题外区块固定行距；备选 28.9
+  title_line_pt: 32       # 标题固定行距
+
+blank_lines:
+  before_title: 2         # 标题上方空行
+  before_attachment: 1    # 附件与正文之间空行
+  before_signature: 3     # 落款（发文单位）与正文/附件之间空行
+
+# 各区块样式。align 取值：left/center/right/justify/center_to_date/right_indent_4chars
+# first_line_chars 单位为字符（2 字符 = 缩进两个汉字宽）
+styles:
+  title:      { cn: "方正小标宋简体", size_pt: 22, bold: false, align: center,  first_line_chars: 0, line_pt: 32 }
+  subtitle:   { cn: "楷体_GB2312",   size_pt: 16, bold: false, align: center,  first_line_chars: 0 }
+  recipient:  { cn: "仿宋_GB2312",   size_pt: 16, bold: false, align: justify, first_line_chars: 0 }
+  body:       { cn: "仿宋_GB2312",   size_pt: 16, bold: false, align: justify, first_line_chars: 2 }
+  h1:         { cn: "黑体",          size_pt: 16, bold: false, align: justify, first_line_chars: 2 }
+  h2:         { cn: "楷体_GB2312",   size_pt: 16, bold: false, align: justify, first_line_chars: 2 }
+  h3:         { cn: "仿宋_GB2312",   size_pt: 16, bold: false, align: justify, first_line_chars: 2 }
+  h4:         { cn: "仿宋_GB2312",   size_pt: 16, bold: false, align: justify, first_line_chars: 2 }
+  attachment_head:  { cn: "仿宋_GB2312", size_pt: 16, bold: false, align: justify, first_line_chars: 2 }
+  attachment_other: { cn: "仿宋_GB2312", size_pt: 16, bold: false, align: justify, first_line_chars: 5 }
+  sign_unit:  { cn: "仿宋_GB2312",   size_pt: 16, bold: false, align: right_indent_2chars, first_line_chars: 0 }
+  sign_date:  { cn: "仿宋_GB2312",   size_pt: 16, bold: false, align: right_indent_2chars, first_line_chars: 0 }
+  sign_contact: { cn: "仿宋_GB2312", size_pt: 16, bold: false, align: justify, first_line_chars: 2 }
+  # 可选扩展类型：涉密标识（不在标准 11 类内，保留兼容）
+  security:   { cn: "黑体",          size_pt: 16, bold: false, align: left,    first_line_chars: 0 }
+
+page_number:
+  cn: "宋体"
+  size_pt: 14
+  format: "— {PAGE} —"    # 一字线 + 空格 + 页码 + 空格 + 一字线（GB/T 9704）
+  odd_right_even_left: true
