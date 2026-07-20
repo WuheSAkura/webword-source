@@ -3,19 +3,26 @@
 流程：
   build_structure(path)            识别每段类型 + 置信度，供人工校正
   convert_with_roles(in,out,roles) 按用户校正后的类型套格式，返回转换日志
-所有格式参数来自 config.get_config()，不在本文件硬编码。
+所有格式参数来自基础配置与文种模板配置，不在本文件硬编码。
 """
 
 import re
-import copy as _copy
+from copy import deepcopy
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 from docx import Document
+from docx.document import Document as DocxDocument
 from docx.shared import Pt, Cm
 from docx.enum.text import WD_LINE_SPACING
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 
-from config import get_config
+from config import (
+    get_document_config,
+    get_template_classification,
+    normalize_template_id,
+)
 
 ALIGN_MAP = {"left": 0, "center": 1, "right": 2, "justify": 3}
 CHAR_WIDTH_CM = 0.565  # 三号字单字宽近似，仅用于无 *Chars 属性时的兜底
@@ -35,6 +42,15 @@ RE_DATE_FULL = re.compile(r"^\s*\d{4}\s*年\s*\d{0,2}\s*月\s*\d{0,2}\s*日\s*$"
 RE_SECURITY = re.compile(r"^(绝密|机密|秘密|内部)(★|▲)?")
 RE_YEAR_HEAD = re.compile(r"^\d{4}\s*年")  # 排除“2026年…”被误判为三级标题
 RE_FULL_BRACKET = re.compile(r"^[（(].+[)）]$")
+RE_DOC_NUMBER = re.compile(r"〔\s*\d{4}\s*〕.*号\s*$")
+RE_CARRIER_META = re.compile(r"(签发人|等级[：:]|发电时间|承办单位|抄送[：:]|主送[：:]|内部传真电报|印发\s*$)")
+
+HIERARCHY_PATTERNS = {
+    "h1": RE_H1,
+    "h2": RE_H2,
+    "h3": RE_H3,
+    "h4": RE_H4,
+}
 
 # 文种关键词（用于标题启发式）
 TITLE_END = ("通知", "通报", "报告", "请示", "方案", "意见", "决定", "函", "规定",
@@ -127,37 +143,11 @@ def split_prelude_title(text: str) -> list[str]:
     return result
 
 
-def split_heading_body(text: str) -> list[str]:
-    """把编号标题后紧跟的正文拆开，避免整段正文套标题字体。"""
-    t = text.strip()
-    if not t:
-        return []
-    if RE_H1.match(t):
-        match = re.search(r"\s+", t)
-        if match:
-            heading, body = t[:match.start()].strip(), t[match.end():].strip()
-            if 4 <= len(heading) <= 30 and body:
-                return [heading, body]
-        return [t]
-    h2_match = RE_H2.match(t)
-    h3_match = RE_H3.match(t)
-    if h2_match or h3_match:
-        search_start = h3_match.end() if h3_match else 0
-        match = re.search(r"[。.!！?？]", t[search_start:])
-        if match and match.end() < len(t):
-            end = search_start + match.end()
-            heading, body = t[:end].strip(), t[end:].strip()
-            if 4 <= len(heading) <= 45 and body:
-                return [heading, body]
-        return [t]
-    return [t]
-
-
 def refine_logical_parts(parts: list[str]) -> list[str]:
     refined = []
     for part in parts:
         for prelude_part in split_prelude_title(part.strip()):
-            refined.extend(split_heading_body(prelude_part))
+            refined.append(prelude_part)
     return [p for p in refined if p.strip()]
 
 
@@ -174,9 +164,9 @@ def insert_paragraph_before(para_element):
     return new_p
 
 
-def split_document_paragraphs(doc: Document) -> list:
+def split_document_paragraphs(doc: DocxDocument) -> list:
     """遍历所有段落，对含多个编号块的段落进行拆分。返回 (element, text) 列表。"""
-    result = []
+    result: list[tuple] = []
     for para in doc.paragraphs:
         text = para.text.strip()
         if not text:
@@ -222,10 +212,14 @@ def _para_format_hint(para) -> dict:
     return {"centered": centered, "max_size": max_size, "bold": bold}
 
 
-def classify_one(text: str, index: int, total: int, fmt: dict | None = None) -> tuple[str, float]:
+def classify_one(text: str, index: int, total: int, fmt: dict | None = None,
+                 template_id: str | None = None) -> tuple[str, float]:
     """对单个逻辑段落做基础分类，返回 (role, confidence)。多信号：正则+位置+原格式+长度。"""
     t = text.strip()
     fmt = fmt or {}
+    rules = get_template_classification(template_id)
+    recipient_policy = rules.get("recipient", "optional")
+    title_keywords = tuple(rules.get("title_keywords") or ())
     if not t:
         return "body", 0.0
 
@@ -257,7 +251,10 @@ def classify_one(text: str, index: int, total: int, fmt: dict | None = None) -> 
     if RE_DATE_FULL.match(t) and near_tail:
         return "sign_date", 0.95
 
-    # 4. 标题（文头区）
+    # 4. 标题（文头区）。已选文种时，文种词比通用启发式优先级更高。
+    if index <= 20 and 2 <= len(t) <= 100 and title_keywords:
+        if any(t.endswith(keyword) or f"的{keyword}" in t[-24:] for keyword in title_keywords):
+            return "title", 0.98
     if near_head and 4 <= len(t) <= 90:
         if RE_TITLE_KW.match(t) or (len(t) <= 35 and any(t.endswith(k) for k in TITLE_END)):
             return "title", 0.9
@@ -266,15 +263,17 @@ def classify_one(text: str, index: int, total: int, fmt: dict | None = None) -> 
             return "title", 0.75 if fmt.get("bold") else 0.7
 
     # 5. 副标题：文头整段括号文本
-    if near_head and RE_FULL_BRACKET.match(t) and len(t) <= 60:
+    if (rules.get("subtitle", "optional") != "forbidden"
+            and near_head and RE_FULL_BRACKET.match(t) and len(t) <= 60):
         return "subtitle", 0.75
 
     # 5b. 主送机关（发文对象）：文头区、以冒号结尾的称呼行，顶格不缩进
     #     排除“……如下：”等正文引出句，避免误判
-    if (index <= 6 and RE_RECIPIENT.search(t) and 2 <= len(t) <= 60
+    if (recipient_policy != "forbidden" and index <= 6
+            and RE_RECIPIENT.search(t) and 2 <= len(t) <= 60
             and not RE_DATE.search(t) and "。" not in t
             and not t.endswith(("如下：", "如下:"))):
-        return "recipient", 0.85
+        return "recipient", 0.95 if recipient_policy == "required" else 0.85
 
     # 5c. 落款·联系人：文末括号行，含“联系人/电话”，首行缩进2字（不与日期对齐）
     if near_tail and RE_FULL_BRACKET.match(t) and ("联系" in t or "电话" in t):
@@ -287,14 +286,65 @@ def classify_one(text: str, index: int, total: int, fmt: dict | None = None) -> 
     return "body", 0.8
 
 
-def refine_structure(items: list[dict]) -> None:
+def refine_structure(items: list[dict], template_id: str | None = None) -> None:
     """二次校正：利用相邻关系修正副标题/落款配对。就地修改 items。"""
     n = len(items)
+    rules = get_template_classification(template_id)
+    recipient_policy = rules.get("recipient", "optional")
+
+    if recipient_policy == "forbidden":
+        for item in items:
+            if item["role"] == "recipient":
+                item["role"] = "body"
+                item["confidence"] = 0.8
+
+    title_start = 0
+    # 文种已知时，以最后一个强文种标题为准；其前面的版头、文号、签发信息原样保留。
+    if normalize_template_id(template_id) != "generic":
+        keywords = tuple(rules.get("title_keywords") or ())
+        candidates = [
+            i for i, item in enumerate(items[:21])
+            if keywords and any(
+                item["fullText"].strip().endswith(keyword)
+                or f"的{keyword}" in item["fullText"].strip()[-24:]
+                for keyword in keywords
+            )
+        ]
+        if candidates:
+            title_idx = candidates[-1]
+            leading_limit = max(0, int(rules.get("title_leading_lines", 2)))
+            title_start = title_idx
+            for i in range(title_idx - 1, max(-1, title_idx - leading_limit - 1), -1):
+                text = items[i]["fullText"].strip()
+                if (RE_DOC_NUMBER.search(text) or RE_ATTACH.match(text)
+                        or RE_CARRIER_META.search(text) or text.endswith(("：", ":"))):
+                    break
+                title_start = i
+            for i in range(title_start):
+                if items[i]["role"] != "security":
+                    items[i]["role"] = "other"
+                    items[i]["confidence"] = 0.95
+            for i in range(title_start, title_idx + 1):
+                items[i]["role"] = "title"
+                items[i]["confidence"] = max(items[i]["confidence"], 0.9)
+
+    # 需要主送机关的文种，以标题后的首个称呼行作为主送机关；版头存在时不再受绝对索引限制。
+    if recipient_policy == "required":
+        title_end = max((i for i, item in enumerate(items) if item["role"] == "title"), default=-1)
+        for i in range(title_end + 1, min(n, title_end + 5)):
+            text = items[i]["fullText"].strip()
+            if (RE_RECIPIENT.search(text) and 2 <= len(text) <= 60
+                    and not RE_DATE.search(text) and "。" not in text
+                    and not text.endswith(("如下：", "如下:"))):
+                items[i]["role"] = "recipient"
+                items[i]["confidence"] = 0.95
+                break
+
     # 发文对象之前基本都是标题：把误判为正文/编号的段落回归标题
     # （标题可跨多行，但行与行之间不应被识别成正文，避免套格式时夹空行）
     recip_idx = next((i for i, it in enumerate(items) if it["role"] == "recipient"), None)
     if recip_idx is not None:
-        for i in range(recip_idx):
+        for i in range(title_start, recip_idx):
             if items[i]["role"] in ("body", "h1", "h2", "h3", "h4", "other"):
                 items[i]["role"] = "title"
                 items[i]["confidence"] = max(items[i]["confidence"], 0.9)
@@ -325,9 +375,9 @@ def refine_structure(items: list[dict]) -> None:
                 prev["confidence"] = max(prev["confidence"], 0.65)
 
 
-def build_structure(file_path: str) -> list[dict]:
+def build_structure(file_path: str, template_id: str | None = None) -> list[dict]:
     """识别文档结构，返回带置信度的清单（供人工校正与套格式共用）。"""
-    config = get_config()
+    template_id = normalize_template_id(template_id)
     doc = Document(str(file_path))
     para_items = split_document_paragraphs(doc)
 
@@ -340,7 +390,7 @@ def build_structure(file_path: str) -> list[dict]:
     for i, (elem, txt) in enumerate(logical):
         para = para_by_elem.get(elem)
         fmt = _para_format_hint(para) if para is not None else {}
-        role, conf = classify_one(txt, i, total, fmt)
+        role, conf = classify_one(txt, i, total, fmt, template_id)
         items.append({
             "index": i,
             "role": role,
@@ -349,7 +399,7 @@ def build_structure(file_path: str) -> list[dict]:
             "text": txt[:40] + ("…" if len(txt) > 40 else ""),
             "fullText": txt,
         })
-    refine_structure(items)
+    refine_structure(items, template_id)
     for it in items:
         it["lowConfidence"] = it["confidence"] < LOW_CONFIDENCE
     return items
@@ -411,9 +461,10 @@ def style_for(role: str, config: dict) -> dict:
     """从配置取出某 role 的内部样式字典。"""
     styles = config["styles"]
     s = styles.get(role, styles["body"])
-    line = s.get("line_pt")
-    if line is None:
-        line = config["spacing"]["title_line_pt"] if role == "title" else config["spacing"]["body_line_pt"]
+    prefix = "title" if role == "title" else "body"
+    line = s.get("line_pt", config["spacing"].get(f"{prefix}_line_pt", 32 if prefix == "title" else 28))
+    line_rule = s.get("line_rule", config["spacing"].get(f"{prefix}_line_rule", "exact"))
+    line_multiple = s.get("line_multiple", config["spacing"].get(f"{prefix}_line_multiple", 1.0))
     return {
         "role": role,
         "font_east": s["cn"],
@@ -422,6 +473,8 @@ def style_for(role: str, config: dict) -> dict:
         "bold": s.get("bold", False),
         "align": s.get("align", "justify"),
         "line_spacing": line,
+        "line_rule": line_rule,
+        "line_multiple": line_multiple,
         "first_line_chars": s.get("first_line_chars", 0),
     }
 
@@ -430,8 +483,16 @@ def apply_paragraph_layout(paragraph, style: dict, right_chars_override: float |
                            left_chars_override: float | None = None):
     align = style.get("align", "justify")
     fmt = paragraph.paragraph_format
-    fmt.line_spacing_rule = WD_LINE_SPACING.EXACTLY
-    fmt.line_spacing = Pt(style.get("line_spacing", 28))
+    line_rule = style.get("line_rule", "exact")
+    if line_rule == "single":
+        fmt.line_spacing = 1.0
+        fmt.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    elif line_rule == "multiple":
+        fmt.line_spacing = float(style.get("line_multiple", 1.0))
+        fmt.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
+    else:
+        fmt.line_spacing = Pt(style.get("line_spacing", 28))
+        fmt.line_spacing_rule = WD_LINE_SPACING.EXACTLY
     fmt.space_before = Pt(0)
     fmt.space_after = Pt(0)
     fmt.left_indent = None
@@ -463,18 +524,90 @@ def apply_paragraph_layout(paragraph, style: dict, right_chars_override: float |
             set_left_chars(paragraph, left_chars_override)
 
 
-def apply_style(paragraph, style: dict, right_chars_override: float | None = None,
-                left_chars_override: float | None = None):
-    apply_paragraph_layout(paragraph, style, right_chars_override, left_chars_override)
+def clear_runs(paragraph):
+    """清除段落内容，覆盖普通 run、超链接及修订记录等文本容器。"""
+    for child in list(paragraph._p):
+        if child.tag != qn("w:pPr"):
+            paragraph._p.remove(child)
+
+
+def clear_paragraph_run_format(paragraph):
     pPr = paragraph._element.find(qn("w:pPr"))
     if pPr is not None:
         p_rPr = pPr.find(qn("w:rPr"))
         if p_rPr is not None:
             nuke_run_format(p_rPr)
-    if not paragraph.runs:
-        paragraph.add_run("")
-    for run in paragraph.runs:
-        set_font(run, style["font_east"], style["font_west"], style["size"], style["bold"])
+
+
+def run_font_signature(run) -> tuple[str, float | None, bool]:
+    """提取足以判断标题/正文边界的显式字体特征。"""
+    east = ""
+    rPr = run._element.rPr
+    if rPr is not None:
+        rFonts = rPr.find(qn("w:rFonts"))
+        if rFonts is not None:
+            east = rFonts.get(qn("w:eastAsia")) or ""
+    name = east or run.font.name or ""
+    size = run.font.size.pt if run.font.size else None
+    return name, size, bool(run.font.bold)
+
+
+def has_strong_style_change(before: tuple[str, float | None, bool],
+                            after: tuple[str, float | None, bool]) -> bool:
+    before_name, before_size, before_bold = before
+    after_name, after_size, after_bold = after
+    if before_bold != after_bold:
+        return True
+    if before_name and after_name and before_name != after_name:
+        return True
+    return bool(before_size and after_size and abs(before_size - after_size) >= 0.5)
+
+
+def source_style_boundary(paragraph, text: str, marker_end: int) -> int | None:
+    """从原文显式 run 格式切换中寻找标题短语结束位置。"""
+    runs = [run for run in paragraph.runs if run.text]
+    run_text = "".join(run.text for run in runs)
+    if not runs or run_text.strip() != text.strip():
+        return None
+
+    leading = len(run_text) - len(run_text.lstrip())
+    initial_signature = None
+    raw_offset = 0
+    for run in runs:
+        run_start = raw_offset
+        raw_offset += len(run.text)
+        if not run.text.strip():
+            continue
+        signature = run_font_signature(run)
+        if initial_signature is None:
+            initial_signature = signature
+            continue
+        boundary = run_start - leading
+        if boundary < marker_end + 1 or boundary >= len(text):
+            continue
+        if has_strong_style_change(initial_signature, signature) and text[boundary:].strip():
+            return boundary
+    return None
+
+
+def inline_heading_boundary(paragraph, text: str, role: str, config: dict) -> int | None:
+    """确定同段标题短语边界；返回 None 表示整段均为标题。"""
+    pattern = HIERARCHY_PATTERNS.get(role)
+    marker = pattern.match(text) if pattern else None
+    if marker is None:
+        return None
+
+    rules = config.get("inline_hierarchy") or {}
+    if rules.get("prefer_source_style_boundary", True):
+        boundary = source_style_boundary(paragraph, text, marker.end())
+        if boundary is not None:
+            return boundary
+
+    terminators = str(rules.get("terminators") or "。！？；：.!?;:")
+    for index in range(marker.end(), len(text)):
+        if text[index] in terminators and text[index + 1:].strip():
+            return index + 1
+    return None
 
 
 def clean_text(text: str) -> str:
@@ -485,6 +618,76 @@ def clean_text(text: str) -> str:
     text = re.sub(r"^([（(]\d+[）)])\s+", r"\1", text)
     text = re.sub(r"^(\d+[.．、])\s+", r"\1", text)
     return text.strip()
+
+
+def append_styled_segment(segments: list[tuple[str, dict]], text: str, style: dict):
+    if not text:
+        return
+    if segments and segments[-1][1] == style:
+        previous_text, previous_style = segments[-1]
+        segments[-1] = (previous_text + text, previous_style)
+    else:
+        segments.append((text, style))
+
+
+def body_marker_segments(text: str, body_style: dict, config: dict) -> list[tuple[str, dict]]:
+    """仅将“一是、二是”等段内层次标识加粗，正文保持正文样式。"""
+    rules = config.get("inline_hierarchy") or {}
+    markers = [str(marker) for marker in (rules.get("body_markers") or []) if str(marker)]
+    if not markers:
+        return [(text, body_style)] if text else []
+
+    marker_style = dict(body_style)
+    marker_style["bold"] = bool(rules.get("body_marker_bold", True))
+    pattern = re.compile("|".join(re.escape(marker) for marker in sorted(markers, key=len, reverse=True)))
+    boundary_chars = "。；！？：:\n"
+    segments: list[tuple[str, dict]] = []
+    cursor = 0
+    for match in pattern.finditer(text):
+        previous = match.start() - 1
+        while previous >= 0 and text[previous].isspace():
+            previous -= 1
+        if previous >= 0 and text[previous] not in boundary_chars:
+            continue
+        append_styled_segment(segments, text[cursor:match.start()], body_style)
+        append_styled_segment(segments, match.group(0), marker_style)
+        cursor = match.end()
+    append_styled_segment(segments, text[cursor:], body_style)
+    return segments
+
+
+def replace_runs_with_segments(paragraph, segments: list[tuple[str, dict]]):
+    clear_runs(paragraph)
+    for text, style in segments:
+        if not text:
+            continue
+        run = paragraph.add_run(text)
+        set_font(run, style["font_east"], style["font_west"], style["size"], style["bold"])
+
+
+def apply_role_style(paragraph, text: str, role: str, config: dict,
+                     clean_spaces: bool = True):
+    """统一应用段落布局和段内字体，标题短语与后续正文保持在同一段。"""
+    role_style = style_for(role, config)
+    body_style = style_for("body", config)
+    apply_paragraph_layout(paragraph, role_style)
+    clear_paragraph_run_format(paragraph)
+
+    segments: list[tuple[str, dict]] = []
+    boundary = inline_heading_boundary(paragraph, text, role, config)
+    if role in HIERARCHY_PATTERNS and boundary is not None:
+        heading_text = clean_text(text[:boundary]) if clean_spaces else text[:boundary]
+        body_text = clean_text(text[boundary:]) if clean_spaces else text[boundary:]
+        append_styled_segment(segments, heading_text, role_style)
+        segments.extend(body_marker_segments(body_text, body_style, config))
+    else:
+        normalized = clean_text(text) if clean_spaces else text
+        if role == "body":
+            segments.extend(body_marker_segments(normalized, body_style, config))
+        else:
+            append_styled_segment(segments, normalized, role_style)
+
+    replace_runs_with_segments(paragraph, segments)
 
 
 # ── 页面 / 空行 / 页码 ──
@@ -526,7 +729,7 @@ def remove_blank_paragraphs_before(para_element):
         to_remove.getparent().remove(to_remove)
 
 
-def _enable_even_odd_headers(doc: Document):
+def _enable_even_odd_headers(doc: DocxDocument):
     settings = doc.settings.element
     if settings.find(qn("w:evenAndOddHeaders")) is None:
         el = OxmlElement("w:evenAndOddHeaders")
@@ -566,7 +769,7 @@ def add_page_number_field(paragraph, align_key: str, page_number: dict):
         set_font(r, cn, west, size)
 
 
-def set_page_numbers(doc: Document, page_number: dict):
+def set_page_numbers(doc: DocxDocument, page_number: dict):
     odd_right = page_number.get("odd_right_even_left", True)
     if odd_right:
         _enable_even_odd_headers(doc)
@@ -590,10 +793,12 @@ def _display_width(text: str) -> float:
 
 
 def convert_with_roles(input_path: str, output_path: str,
-                       roles: dict[int, str] | None = None,
-                       clean_spaces: bool = True) -> dict:
+                       roles: Mapping[Any, str] | None = None,
+                       clean_spaces: bool = True,
+                       template_id: str | None = None) -> dict:
     """按 roles（{逻辑段索引: 角色}）套格式；缺失的段落回退自动识别。返回转换日志。"""
-    config = get_config()
+    template_id = normalize_template_id(template_id)
+    config = get_document_config(template_id)
     roles = {int(k): v for k, v in (roles or {}).items()}
 
     doc = Document(str(input_path))
@@ -604,15 +809,22 @@ def convert_with_roles(input_path: str, output_path: str,
     total = len(logical)
 
     # 先算好每段最终角色（含自动识别兜底），便于跨段落计算（落款居中）
-    final_roles = []
-    fmt_cache = []
+    auto_items = []
     for i, (elem, txt) in enumerate(logical):
         para = para_by_elem.get(elem)
         fmt = _para_format_hint(para) if para is not None else {}
-        fmt_cache.append(fmt)
-        auto_role, _ = classify_one(txt, i, total, fmt)
+        auto_role, confidence = classify_one(txt, i, total, fmt, template_id)
+        auto_items.append({
+            "index": i, "role": auto_role, "confidence": confidence,
+            "fullText": txt,
+        })
+    refine_structure(auto_items, template_id)
+
+    final_roles = []
+    for i, item in enumerate(auto_items):
+        auto_role = item["role"]
         role = roles.get(i, auto_role)
-        if role not in config["styles"]:
+        if role != "other" and role not in config["styles"]:
             role = "body"
         final_roles.append(role)
 
@@ -627,8 +839,11 @@ def convert_with_roles(input_path: str, output_path: str,
         if para is None:
             continue
         role = final_roles[i]
-        style = style_for(role, config)
-
+        if role == "other":
+            log.append({"index": i, "role": role,
+                        "corrected": i in roles and roles[i] != auto_items[i]["role"],
+                        "text": txt[:30]})
+            continue
         # 空行规范化
         if role == "title":
             if not seen_title:
@@ -646,17 +861,9 @@ def convert_with_roles(input_path: str, output_path: str,
             ensure_blank_paragraphs_before(elem, blank.get("before_signature", 3))
             seen_signature = True
 
-        cleaned = clean_text(txt) if clean_spaces else txt
-        if cleaned != para.text and para.runs:
-            runs_len = sum(len(r.text) for r in para.runs)
-            for r in para.runs:
-                r.text = ""
-            if para.runs and runs_len > 0:
-                para.runs[0].text = cleaned
-
-        apply_style(para, style)
+        apply_role_style(para, txt, role, config, clean_spaces)
         log.append({"index": i, "role": role,
-                    "corrected": i in roles and roles[i] != classify_one(txt, i, total, fmt_cache[i])[0],
+                    "corrected": i in roles and roles[i] != auto_items[i]["role"],
                     "text": txt[:30]})
 
     set_page(doc, config["page"])
@@ -664,21 +871,20 @@ def convert_with_roles(input_path: str, output_path: str,
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
-    return {"output": output_path, "log": log}
+    return {"output": output_path, "log": log, "template_id": template_id}
 
 
-def convert_docx(input_path: str, output_path: str, clean_spaces: bool = True) -> str:
+def convert_docx(input_path: str, output_path: str, clean_spaces: bool = True,
+                 template_id: str | None = None) -> str:
     """无人工校正的一键转换（自动识别 + 套格式），用于兼容/兜底。"""
-    result = convert_with_roles(input_path, output_path, roles=None, clean_spaces=clean_spaces)
+    result = convert_with_roles(
+        input_path, output_path, roles=None,
+        clean_spaces=clean_spaces, template_id=template_id,
+    )
     return result["output"]
 
 
 # ── 局部字体微调（套格式后的补充编辑）──
-def clear_runs(paragraph):
-    for run in list(paragraph.runs):
-        paragraph._p.remove(run._r)
-
-
 def apply_inline_font(run, font: dict, fallback: dict):
     east = font.get("font_east") or fallback["font_east"]
     west = font.get("font_west") or fallback["font_west"]
@@ -693,39 +899,76 @@ def apply_inline_font(run, font: dict, fallback: dict):
         run.font.underline = bool(font.get("underline"))
 
 
-def build_style(role: str | None, overrides: dict | None = None) -> dict:
-    config = get_config()
-    base_role = role if role in config["styles"] else "body"
+def build_style(role: str | None, overrides: dict | None = None,
+                template_id: str | None = None) -> dict:
+    config = get_document_config(template_id)
+    base_role = role if role is not None and role in config["styles"] else "body"
     style = style_for(base_role, config)
     overrides = overrides or {}
     if overrides.get("alignment"):
         style["align"] = overrides["alignment"]
     if overrides.get("line_spacing") is not None:
         style["line_spacing"] = overrides["line_spacing"]
+    if overrides.get("line_rule"):
+        style["line_rule"] = overrides["line_rule"]
+    elif overrides.get("line_spacing") is not None:
+        style["line_rule"] = "exact"
+    if overrides.get("line_multiple") is not None:
+        style["line_multiple"] = overrides["line_multiple"]
     if overrides.get("first_indent") is not None:
         style["first_line_chars"] = overrides["first_indent"]
     return style
 
 
+def add_run_with_format(paragraph, text: str, rPr):
+    run = paragraph.add_run(text)
+    if rPr is not None:
+        current = run._element.rPr
+        if current is not None:
+            run._element.remove(current)
+        run._element.insert(0, deepcopy(rPr))
+    return run
+
+
 def rewrite_paragraph_with_selection(paragraph, start, end, base_style, font):
+    """只重写选中区间，未选中的 run 格式按原样复制。"""
     text = paragraph.text
     start = max(0, min(start, len(text)))
     end = max(start, min(end, len(text)))
-    before, selected, after = text[:start], text[start:end], text[end:]
-    clear_runs(paragraph)
-    for segment, is_sel in ((before, False), (selected, True), (after, False)):
-        if not segment:
+
+    snapshots = []
+    offset = 0
+    for run in paragraph.runs:
+        if not run.text:
             continue
-        run = paragraph.add_run(segment)
-        if is_sel and font:
-            apply_inline_font(run, font, base_style)
-        else:
-            set_font(run, base_style["font_east"], base_style["font_west"],
-                     base_style["size"], base_style["bold"])
+        run_start = offset
+        offset += len(run.text)
+        snapshots.append((run_start, offset, run.text, deepcopy(run._element.rPr)))
+
+    if not snapshots or "".join(item[2] for item in snapshots) != text:
+        snapshots = [(0, len(text), text, None)]
+
+    clear_runs(paragraph)
+    for run_start, run_end, run_text, rPr in snapshots:
+        cut_points = {run_start, run_end}
+        if run_start < start < run_end:
+            cut_points.add(start)
+        if run_start < end < run_end:
+            cut_points.add(end)
+        ordered = sorted(cut_points)
+        for left, right in zip(ordered, ordered[1:]):
+            segment = run_text[left - run_start:right - run_start]
+            if not segment:
+                continue
+            selected = left < end and right > start
+            run = add_run_with_format(paragraph, segment, rPr)
+            if selected and font:
+                apply_inline_font(run, font, base_style)
 
 
 def apply_local_edit(docx_path: str, selection: dict, font: dict | None = None,
-                     paragraph: dict | None = None) -> str:
+                     paragraph: dict | None = None,
+                     template_id: str | None = None) -> str:
     doc = Document(str(docx_path))
     paragraphs = doc.paragraphs
     start_para = int(selection.get("startParagraph", 0))
@@ -748,8 +991,8 @@ def apply_local_edit(docx_path: str, selection: dict, font: dict | None = None,
         text = para.text
         if not text:
             continue
-        role = role_override or classify_one(text, para_index, total)[0]
-        base_style = build_style(role, paragraph)
+        role = role_override or classify_one(text, para_index, total, template_id=template_id)[0]
+        base_style = build_style(role, paragraph, template_id)
         apply_paragraph_layout(para, base_style)
         seg_start = start_offset if para_index == start_para else 0
         seg_end = end_offset if para_index == end_para else len(text)

@@ -17,11 +17,19 @@ from pydantic import BaseModel
 from docx import Document
 from docx.oxml.ns import qn
 
-from config import get_config, ROLE_LABELS
+from config import (
+    ROLE_LABELS,
+    get_default_template_id,
+    get_resolved_styles,
+    get_template_catalog,
+    has_document_template,
+    normalize_template_id,
+)
 from converter import (
     convert_with_roles,
     build_structure,
     classify_one,
+    refine_structure,
     split_paragraph_text,
     apply_local_edit,
 )
@@ -32,13 +40,14 @@ TEMP_DIR.mkdir(exist_ok=True)
 STATIC_DIR = BASE_DIR / "static"
 MAX_FILE_SIZE = 20 * 1024 * 1024
 
-# { file_id: {path, name, size, processed, result_id, result_path, roles, log, undo_stack} }
-uploaded_files = {}
-processed_files = {}
+# { file_id: {path, name, size, processed, result_id, result_path,
+#              roles, template_id, log, undo_stack} }
+uploaded_files: dict[str, dict] = {}
 
 
 class ConvertRequest(BaseModel):
     roles: dict[str, str] | None = None  # {逻辑段索引(str): 角色}
+    template_id: str | None = None
 
 
 class EditRequest(BaseModel):
@@ -78,8 +87,37 @@ app.add_middleware(
 )
 
 
-def build_result_preview(file_path: str) -> list[dict]:
+def _validate_template_id(template_id: str | None) -> str:
+    if template_id is None:
+        return get_default_template_id()
+    if not has_document_template(template_id):
+        raise HTTPException(400, detail="未知的公文模板")
+    return normalize_template_id(template_id)
+
+
+def _delete_file(path_value) -> None:
+    if not path_value:
+        return
+    try:
+        path = Path(path_value)
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _clear_result_artifacts(info: dict) -> None:
+    _delete_file(info.get("result_path"))
+    for undo_path in info.get("undo_stack") or []:
+        _delete_file(undo_path)
+    info["undo_stack"] = []
+
+
+def build_result_preview(file_path: str, roles: dict | None = None,
+                         template_id: str | None = None) -> list[dict]:
     """从套好格式的 docx 提取段落预览（含 run 字体），供结果预览与局部编辑。"""
+    template_id = normalize_template_id(template_id)
+    corrected_roles = {int(k): v for k, v in (roles or {}).items()}
     doc = Document(str(file_path))
     logical_items = []
     for source_index, paragraph in enumerate(doc.paragraphs):
@@ -114,20 +152,64 @@ def build_result_preview(file_path: str) -> list[dict]:
             })
         return runs or [{"text": text, "fontEast": "", "fontWest": "", "size": None, "bold": None}]
 
+    def xml_number(element, attr_name: str, divisor: float = 1.0):
+        if element is None:
+            return None
+        raw = element.get(qn(attr_name))
+        try:
+            return round(float(raw) / divisor, 2) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def extract_layout(paragraph):
+        align_map = {None: "left", 0: "left", 1: "center", 2: "right", 3: "justify", 4: "distribute"}
+        layout = {
+            "align": align_map.get(paragraph.alignment, "left"),
+            "lineRule": None,
+            "linePt": None,
+            "lineMultiple": None,
+            "firstLineChars": 0,
+            "leftChars": 0,
+            "rightChars": 0,
+        }
+        pPr = paragraph._p.find(qn("w:pPr"))
+        if pPr is None:
+            return layout
+        spacing = pPr.find(qn("w:spacing"))
+        if spacing is not None:
+            line_rule = spacing.get(qn("w:lineRule")) or "auto"
+            line_value = xml_number(spacing, "w:line")
+            layout["lineRule"] = "exact" if line_rule == "exact" else ("atLeast" if line_rule == "atLeast" else "multiple")
+            if line_rule in ("exact", "atLeast") and line_value is not None:
+                layout["linePt"] = round(line_value / 20, 2)
+            elif line_value is not None:
+                layout["lineMultiple"] = round(line_value / 240, 2)
+        ind = pPr.find(qn("w:ind"))
+        if ind is not None:
+            layout["firstLineChars"] = xml_number(ind, "w:firstLineChars", 100) or 0
+            layout["leftChars"] = xml_number(ind, "w:leftChars", 100) or 0
+            layout["rightChars"] = xml_number(ind, "w:rightChars", 100) or 0
+        return layout
+
     items = []
     for i, (source_index, paragraph, text) in enumerate(logical_items):
-        role, _ = classify_one(text, i, total)
-        align_map = {None: "左", 0: "左", 1: "中", 2: "右", 3: "两端"}
+        role, confidence = classify_one(text, i, total, template_id=template_id)
         items.append({
             "index": i,
             "text": text[:200] + ("..." if len(text) > 200 else ""),
             "fullText": text,
             "role": role,
             "sourceIndex": source_index,
-            "roleLabel": ROLE_LABELS.get(role, "正文"),
+            "confidence": confidence,
             "runs": extract_runs(paragraph, text),
-            "align": align_map.get(paragraph.alignment, "左"),
+            "layout": extract_layout(paragraph),
         })
+    refine_structure(items, template_id)
+    for item in items:
+        role = corrected_roles.get(item["index"], item["role"])
+        item["role"] = role
+        item["roleLabel"] = ROLE_LABELS.get(role, "正文")
+        item.pop("confidence", None)
     return items
 
 
@@ -140,8 +222,14 @@ async def health():
 @app.get("/api/config")
 async def get_format_config():
     """返回格式配置与角色标签，供前端校正/编辑面板使用（消除前端硬编码）。"""
-    config = get_config()
-    return {"success": True, "styles": config["styles"], "labels": ROLE_LABELS}
+    default_template_id = get_default_template_id()
+    return {
+        "success": True,
+        "styles": get_resolved_styles(default_template_id),
+        "labels": ROLE_LABELS,
+        "defaultTemplateId": default_template_id,
+        "templates": get_template_catalog(),
+    }
 
 
 @app.post("/api/upload")
@@ -160,6 +248,7 @@ async def upload(files: list[UploadFile] = File(...)):
         uploaded_files[fid] = {
             "path": fpath, "name": file.filename, "size": len(content),
             "processed": False, "result_id": None, "roles": {},
+            "template_id": get_default_template_id(),
             "log": [], "undo_stack": [],
         }
         result.append({"id": fid, "name": file.filename, "size": len(content)})
@@ -167,16 +256,21 @@ async def upload(files: list[UploadFile] = File(...)):
 
 
 @app.get("/api/structure/{file_id}")
-async def get_structure(file_id: str):
+async def get_structure(file_id: str, template_id: str | None = None):
     """识别结构清单（带置信度），供人工校正。"""
     info = uploaded_files.get(file_id)
     if not info or not info["path"].exists():
         raise HTTPException(404, detail="文件不存在或已过期")
+    resolved_template_id = _validate_template_id(template_id or info.get("template_id"))
     try:
-        items = build_structure(str(info["path"]))
+        items = build_structure(str(info["path"]), resolved_template_id)
     except Exception as e:
         raise HTTPException(500, detail=f"结构识别失败：{str(e)}")
-    return {"success": True, "name": info["name"], "paragraphs": items}
+    info["template_id"] = resolved_template_id
+    return {
+        "success": True, "name": info["name"],
+        "templateId": resolved_template_id, "paragraphs": items,
+    }
 
 
 @app.post("/api/convert/{file_id}")
@@ -187,22 +281,29 @@ async def convert_one(file_id: str, payload: ConvertRequest | None = None):
         raise HTTPException(404, detail="文件不存在或已过期")
 
     roles = (payload.roles if payload else None) or {}
+    template_id = _validate_template_id(
+        (payload.template_id if payload else None) or info.get("template_id")
+    )
     result_id = uuid.uuid4().hex
     output_path = TEMP_DIR / f"{result_id}.docx"
 
     try:
-        result = convert_with_roles(str(info["path"]), str(output_path), roles=roles)
+        result = convert_with_roles(
+            str(info["path"]), str(output_path),
+            roles=roles, template_id=template_id,
+        )
     except Exception as e:
         raise HTTPException(500, detail=f"转换失败：{str(e)}")
 
+    _clear_result_artifacts(info)
     info.update({
         "processed": True, "result_id": result_id,
-        "result_path": str(output_path), "roles": roles,
+        "result_path": str(output_path), "roles": roles, "template_id": template_id,
         "log": result["log"], "undo_stack": [],
     })
-    processed_files[result_id] = str(output_path)
     return {
         "success": True, "fileId": file_id, "resultId": result_id,
+        "templateId": template_id,
         "filename": f"{Path(info['name']).stem}_公文格式.docx",
         "log": result["log"], "message": "转换完成",
     }
@@ -218,7 +319,7 @@ async def preview_result(file_id: str):
     rpath = info["result_path"]
     if not Path(rpath).exists():
         raise HTTPException(404, detail="处理结果文件不存在")
-    items = build_result_preview(rpath)
+    items = build_result_preview(rpath, info.get("roles"), info.get("template_id"))
     return {"success": True, "name": info["name"], "type": "processed", "paragraphs": items}
 
 
@@ -234,7 +335,10 @@ async def edit_result(file_id: str, payload: EditRequest):
     if not rpath.exists():
         original = info.get("path")
         if original and original.exists():
-            convert_with_roles(str(original), str(rpath), roles=info.get("roles") or {})
+            convert_with_roles(
+                str(original), str(rpath), roles=info.get("roles") or {},
+                template_id=info.get("template_id"),
+            )
         else:
             raise HTTPException(404, detail="处理结果文件不存在，请重新上传并处理")
 
@@ -248,13 +352,24 @@ async def edit_result(file_id: str, payload: EditRequest):
             old.unlink()
 
     try:
-        apply_local_edit(str(rpath), payload.selection, payload.font, payload.paragraph)
+        apply_local_edit(
+            str(rpath), payload.selection, payload.font, payload.paragraph,
+            template_id=info.get("template_id"),
+        )
     except Exception as e:
         if undo_path.exists():
             shutil.copyfile(undo_path, rpath)
+            undo_path.unlink()
+        if undo_stack and undo_stack[-1] == str(undo_path):
+            undo_stack.pop()
         raise HTTPException(500, detail=f"应用修改失败：{str(e)}")
 
-    return {"success": True, "paragraphs": build_result_preview(str(rpath))}
+    return {
+        "success": True,
+        "paragraphs": build_result_preview(
+            str(rpath), info.get("roles"), info.get("template_id"),
+        ),
+    }
 
 
 @app.post("/api/undo/{file_id}")
@@ -273,7 +388,12 @@ async def undo_edit(file_id: str):
         raise HTTPException(404, detail="撤销文件不存在")
     shutil.copyfile(undo_path, rpath)
     undo_path.unlink()
-    return {"success": True, "paragraphs": build_result_preview(str(rpath))}
+    return {
+        "success": True,
+        "paragraphs": build_result_preview(
+            str(rpath), info.get("roles"), info.get("template_id"),
+        ),
+    }
 
 
 @app.get("/api/download/{file_id}")
@@ -302,13 +422,8 @@ async def clear_files():
                 info["path"].unlink()
         except OSError:
             pass
-        if info.get("result_path"):
-            try:
-                Path(info["result_path"]).unlink()
-            except OSError:
-                pass
+        _clear_result_artifacts(info)
     uploaded_files.clear()
-    processed_files.clear()
     return {"success": True}
 
 

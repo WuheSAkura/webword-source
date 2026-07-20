@@ -61,12 +61,15 @@
           :processingCount="processingCount"
           :pendingCount="pendingCount"
           :selection="selectionRange"
-          :styles="roleStyles"
+          :styles="selectedTemplateStyles"
           :labels="roleLabels"
+          :templates="templateOptions"
+          :selectedTemplateId="selectedTemplateId"
           @process="handleProcess"
           @download="handleDownload"
           @applyEdit="handleApplyEdit"
           @undoEdit="handleUndoEdit"
+          @changeTemplate="handleChangeTemplate"
         />
       </div>
     </div>
@@ -94,6 +97,8 @@ const previewLoading = ref(false)
 const selectionRange = ref(null)
 const roleStyles = ref({})
 const roleLabels = ref({})
+const templateOptions = ref([])
+const defaultTemplateId = ref('generic')
 
 // 缓存每个文件的结构清单与结果预览 { fid: { structure, result } }
 const cache = ref({})
@@ -103,6 +108,11 @@ const processingCount = computed(() => fileList.value.filter(f => f.status === '
 const pendingCount = computed(() => fileList.value.filter(f => f.status === 'pending').length)
 
 const selectedFile = computed(() => fileList.value.find(f => f.id === selectedId.value) || null)
+const selectedTemplateId = computed(() => selectedFile.value?.templateId || defaultTemplateId.value)
+const selectedTemplateStyles = computed(() => {
+  const template = templateOptions.value.find(item => item.id === selectedTemplateId.value)
+  return template?.styles || roleStyles.value
+})
 const isSelectedCompleted = computed(() => selectedFile.value?.status === 'completed')
 const isSelectedProcessing = computed(() => selectedFile.value?.status === 'processing')
 const resultAvailable = computed(() => !!resultData.value || selectedFile.value?.status === 'completed')
@@ -113,6 +123,8 @@ onMounted(async () => {
     if (res.data.success) {
       roleStyles.value = res.data.styles || {}
       roleLabels.value = res.data.labels || {}
+      defaultTemplateId.value = res.data.defaultTemplateId || 'generic'
+      templateOptions.value = res.data.templates || []
     }
   } catch { /* 用前端兜底标签 */ }
 })
@@ -129,12 +141,16 @@ function refreshDisplay(fid) {
 }
 
 async function loadStructure(fid) {
+  const file = fileList.value.find(item => item.id === fid)
+  const templateId = file?.templateId || defaultTemplateId.value
   previewLoading.value = true
   try {
-    const res = await getStructure(fid)
-    getCache(fid).structure = res.data
+    const res = await getStructure(fid, templateId)
+    const current = fileList.value.find(item => item.id === fid)
+    if (current && current.templateId === templateId) getCache(fid).structure = res.data
   } catch {
-    getCache(fid).structure = null
+    const current = fileList.value.find(item => item.id === fid)
+    if (current && current.templateId === templateId) getCache(fid).structure = null
   } finally {
     previewLoading.value = false
     if (selectedId.value === fid) refreshDisplay(fid)
@@ -171,7 +187,9 @@ async function handleUpload(files) {
   try {
     const res = await uploadFiles(docxFiles)
     if (res.data.success) {
-      for (const item of res.data.files) fileList.value.push({ ...item, status: 'pending' })
+      for (const item of res.data.files) {
+        fileList.value.push({ ...item, status: 'pending', templateId: defaultTemplateId.value })
+      }
       if (!selectedId.value && fileList.value.length > 0) await selectFile(fileList.value[0].id)
       ElMessage.success(`已添加 ${res.data.files.length} 个文件`)
     }
@@ -218,11 +236,28 @@ function handleChangeRole({ index, role }) {
   if (item) { item.role = role; item.lowConfidence = false }
 }
 
+async function handleChangeTemplate(templateId) {
+  const file = selectedFile.value
+  if (!file || file.templateId === templateId) return
+  file.templateId = templateId
+  file.status = 'pending'
+  const c = getCache(file.id)
+  c.structure = null
+  c.result = null
+  structureData.value = null
+  resultData.value = null
+  selectionRange.value = null
+  activeTab.value = 'structure'
+  await loadStructure(file.id)
+}
+
 async function processOneFile(targetId, showMessage = true) {
   setFileStatus(targetId, 'processing')
   try {
     const roles = rolesFromStructure(targetId)
-    const res = await convertFile(targetId, roles)
+    const file = fileList.value.find(item => item.id === targetId)
+    const templateId = file?.templateId || defaultTemplateId.value
+    const res = await convertFile(targetId, roles, templateId)
     if (res.data.success) {
       setFileStatus(targetId, 'completed')
       const pr = await previewResult(targetId)

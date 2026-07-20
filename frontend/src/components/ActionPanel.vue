@@ -11,6 +11,25 @@
     </div>
     <div v-else class="no-file">未选择文件</div>
 
+    <div class="template-box">
+      <label>转换模板</label>
+      <el-select
+        :model-value="selectedTemplateId"
+        size="default"
+        style="width:100%;"
+        :disabled="!selectedFile || isProcessing"
+        @update:model-value="value => $emit('changeTemplate', value)"
+      >
+        <el-option
+          v-for="template in templates"
+          :key="template.id"
+          :label="template.label"
+          :value="template.id"
+        />
+      </el-select>
+      <p v-if="selectedTemplate" class="template-description">{{ selectedTemplate.description }}</p>
+    </div>
+
     <el-button
       type="primary" size="large" style="width:100%;"
       :loading="batchProcessing"
@@ -72,8 +91,20 @@
           <el-option label="右对齐" value="right" />
           <el-option label="两端对齐" value="justify" />
         </el-select>
-        <label>固定行距</label>
-        <el-input-number v-model="paragraphForm.line_spacing" size="small" :min="12" :max="60" :disabled="!selection" />
+        <label>行距规则</label>
+        <el-select v-model="paragraphForm.line_rule" size="small" :disabled="!selection">
+          <el-option label="固定值" value="exact" />
+          <el-option label="单倍行距" value="single" />
+          <el-option label="多倍行距" value="multiple" />
+        </el-select>
+        <template v-if="paragraphForm.line_rule === 'exact'">
+          <label>固定行距</label>
+          <el-input-number v-model="paragraphForm.line_spacing" size="small" :min="12" :max="60" :disabled="!selection" />
+        </template>
+        <template v-else-if="paragraphForm.line_rule === 'multiple'">
+          <label>行距倍数</label>
+          <el-input-number v-model="paragraphForm.line_multiple" size="small" :min="0.5" :max="3" :step="0.05" :precision="2" :disabled="!selection" />
+        </template>
         <label>首行缩进(字)</label>
         <el-input-number v-model="paragraphForm.first_indent" size="small" :min="0" :max="6" :step="1" :disabled="!selection" />
       </div>
@@ -111,10 +142,13 @@ const props = defineProps({
   selection: Object,
   styles: { type: Object, default: () => ({}) },
   labels: { type: Object, default: () => ({}) },
+  templates: { type: Array, default: () => [] },
+  selectedTemplateId: { type: String, default: 'generic' },
 })
-const emit = defineEmits(['process', 'download', 'applyEdit', 'undoEdit'])
+const emit = defineEmits(['process', 'download', 'applyEdit', 'undoEdit', 'changeTemplate'])
 
 const batchProcessing = computed(() => props.processingCount > 0 || props.isProcessing)
+const selectedTemplate = computed(() => props.templates.find(item => item.id === props.selectedTemplateId) || null)
 
 const ROLE_ORDER = ['title', 'subtitle', 'recipient', 'body', 'h1', 'h2', 'h3', 'h4', 'attachment_head', 'attachment_other', 'sign_unit', 'sign_date', 'sign_contact', 'security']
 const FALLBACK_LABELS = {
@@ -140,7 +174,7 @@ function styleToDefault(role) {
   const s = props.styles?.[role]
   if (!s) return null
   const alignRaw = s.align || 'justify'
-  const alignment = (alignRaw === 'center_to_date' || alignRaw === 'right_indent_4chars') ? 'right' : alignRaw
+  const alignment = ['center_to_date', 'right_indent_4chars', 'right_indent_2chars'].includes(alignRaw) ? 'right' : alignRaw
   return {
     font_east: s.cn,
     font_west: 'Times New Roman',
@@ -148,12 +182,14 @@ function styleToDefault(role) {
     bold: !!s.bold,
     alignment,
     line_spacing: s.line_pt || (role === 'title' ? 35 : 28),
+    line_rule: s.line_rule || 'exact',
+    line_multiple: s.line_multiple || 1,
     first_indent: s.first_line_chars || 0,
   }
 }
 
 const fontForm = ref({ font_east: '仿宋_GB2312', font_west: 'Times New Roman', size: 16, bold: false })
-const paragraphForm = ref({ role: 'body', alignment: 'justify', line_spacing: 28, first_indent: 2 })
+const paragraphForm = ref({ role: 'body', alignment: 'justify', line_rule: 'exact', line_spacing: 28, line_multiple: 1, first_indent: 2 })
 
 const selectionText = computed(() => {
   const text = props.selection?.text || ''
@@ -161,12 +197,19 @@ const selectionText = computed(() => {
 })
 
 function applyRoleDefaults(role) {
-  const d = styleToDefault(role) || { font_east: '仿宋_GB2312', font_west: 'Times New Roman', size: 16, bold: false, alignment: 'justify', line_spacing: 28, first_indent: role === 'body' ? 2 : 0 }
+  const d = styleToDefault(role) || { font_east: '仿宋_GB2312', font_west: 'Times New Roman', size: 16, bold: false, alignment: 'justify', line_rule: 'exact', line_spacing: 28, line_multiple: 1, first_indent: role === 'body' ? 2 : 0 }
   fontForm.value = { font_east: d.font_east, font_west: d.font_west, size: d.size, bold: d.bold }
-  paragraphForm.value = { role, alignment: d.alignment, line_spacing: d.line_spacing, first_indent: d.first_indent }
+  paragraphForm.value = {
+    role,
+    alignment: d.alignment,
+    line_rule: d.line_rule,
+    line_spacing: d.line_spacing,
+    line_multiple: d.line_multiple,
+    first_indent: d.first_indent,
+  }
 }
 
-watch(() => props.selection, (selection) => {
+watch([() => props.selection, () => props.styles], ([selection]) => {
   if (selection?.role) applyRoleDefaults(selection.role)
 })
 
@@ -189,6 +232,9 @@ function fmtSize(b) {
 .info-name { font-size: 13px; font-weight: 600; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 4px; }
 .info-size { font-size: 11px; color: #999; margin-bottom: 6px; }
 .no-file { text-align: center; color: #ccc; padding: 24px 0; font-size: 13px; }
+.template-box { margin-bottom: 14px; padding: 10px; border: 1px solid #dce8f4; border-radius: 8px; background: #f8fbff; }
+.template-box > label { display: block; margin-bottom: 6px; color: #1a3a5c; font-size: 12px; font-weight: 700; }
+.template-description { margin: 7px 2px 0; color: #718096; font-size: 11px; line-height: 1.5; }
 .stats { font-size: 12px; color: #888; line-height: 2; }
 .edit-panel h3 { font-size: 15px; margin: 0 0 10px; color: #1a3a5c; }
 .selection-box { min-height: 34px; max-height: 74px; overflow: hidden; padding: 8px; border: 1px solid #cfe0f2; border-radius: 6px; background: #f4f9ff; color: #345; font-size: 12px; line-height: 1.5; word-break: break-all; }

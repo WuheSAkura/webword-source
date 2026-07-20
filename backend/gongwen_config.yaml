@@ -20,13 +20,25 @@ page:
   footer_cm: 2.5
 
 spacing:
+  body_line_rule: exact    # exact/single/multiple
   body_line_pt: 28        # 正文/标题外区块固定行距；备选 28.9
+  body_line_multiple: 1.0 # multiple 时使用
+  title_line_rule: exact
   title_line_pt: 32       # 标题固定行距
+  title_line_multiple: 1.0
 
 blank_lines:
   before_title: 2         # 标题上方空行
   before_attachment: 1    # 附件与正文之间空行
   before_signature: 3     # 落款（发文单位）与正文/附件之间空行
+
+# 标题短语与后续正文处于同一段时，仅格式化标题短语。
+# 优先沿用原文已有的字体/加粗切换；无可靠边界时按首个结束标点判断。
+inline_hierarchy:
+  prefer_source_style_boundary: true
+  terminators: "。！？；：.!?;:"
+  body_markers: ["一是", "二是", "三是", "四是", "五是", "六是", "七是", "八是", "九是", "十是"]
+  body_marker_bold: true
 
 # 各区块样式。align 取值：left/center/right/justify/center_to_date/right_indent_4chars
 # first_line_chars 单位为字符（2 字符 = 缩进两个汉字宽）
@@ -37,8 +49,8 @@ styles:
   body:       { cn: "仿宋_GB2312",   size_pt: 16, bold: false, align: justify, first_line_chars: 2 }
   h1:         { cn: "黑体",          size_pt: 16, bold: false, align: justify, first_line_chars: 2 }
   h2:         { cn: "楷体_GB2312",   size_pt: 16, bold: false, align: justify, first_line_chars: 2 }
-  h3:         { cn: "仿宋_GB2312",   size_pt: 16, bold: false, align: justify, first_line_chars: 2 }
-  h4:         { cn: "仿宋_GB2312",   size_pt: 16, bold: false, align: justify, first_line_chars: 2 }
+  h3:         { cn: "仿宋_GB2312",   size_pt: 16, bold: true,  align: justify, first_line_chars: 2 }
+  h4:         { cn: "仿宋_GB2312",   size_pt: 16, bold: true,  align: justify, first_line_chars: 2 }
   attachment_head:  { cn: "仿宋_GB2312", size_pt: 16, bold: false, align: justify, first_line_chars: 2 }
   attachment_other: { cn: "仿宋_GB2312", size_pt: 16, bold: false, align: justify, first_line_chars: 5 }
   sign_unit:  { cn: "仿宋_GB2312",   size_pt: 16, bold: false, align: right_indent_2chars, first_line_chars: 0 }

@@ -1,0 +1,351 @@
+# 公文文种模板配置
+#
+# 模板只覆盖标题、主送机关、正文层级、附件、落款及页面基础参数；
+# 不生成红头、传真版头、发文字号、签发人或版记。
+# format 中未声明的字段继承 gongwen_config.yaml。
+
+default: generic
+
+templates:
+  generic:
+    order: 0
+    label: 通用转换
+    description: 使用现有通用规则识别并套用公文格式
+    reference: gongwen_config.yaml
+    classification:
+      title_keywords: []
+      recipient: optional
+      subtitle: optional
+      signature: optional
+    format: {}
+
+  resolution:
+    order: 1
+    label: 决议
+    description: 适用于会议审议通过的决议，支持副标题、分项正文和落款
+    reference: XX省公安厅党委会议决议.docx
+    classification:
+      title_keywords: [决议]
+      recipient: forbidden
+      subtitle: optional
+      signature: required
+    format:
+      page:
+        margin_cm: { top: 2.54, bottom: 2.54, left: 3.17, right: 3.17 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: single
+        body_line_rule: single
+
+  decision:
+    order: 2
+    label: 决定
+    description: 适用于作出重要决策、奖惩或部署事项的决定
+    reference: 广西壮族自治区公安厅关于给厅机关2024年度公务员考核优秀等次民警记功嘉奖的决定.wps
+    classification:
+      title_keywords: [决定]
+      recipient: forbidden
+      subtitle: optional
+      signature: required
+    format:
+      page:
+        margin_cm: { top: 3.70, bottom: 2.54, left: 2.38, right: 2.80 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: exact
+        title_line_pt: 32
+        body_line_rule: single
+
+  order:
+    order: 3
+    label: 命令（令）
+    description: 适用于发布命令、任免或授予事项，正文通常不设主送机关
+    reference: 广西壮族自治区公安厅关于授予和晋升赖志庸等同志人民警察警司警衔的命令.docx
+    classification:
+      title_keywords: [命令, 令]
+      recipient: forbidden
+      subtitle: optional
+      signature: optional
+    format:
+      page:
+        margin_cm: { top: 2.54, bottom: 2.54, left: 2.70, right: 2.70 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: exact
+        title_line_pt: 32
+        body_line_rule: exact
+        body_line_pt: 30
+      styles:
+        body: { first_line_chars: 0 }
+        h1: { first_line_chars: 0 }
+        h2: { first_line_chars: 0 }
+        h3: { first_line_chars: 0 }
+        h4: { first_line_chars: 0 }
+
+  communique:
+    order: 4
+    label: 公报
+    description: 适用于公开发布重要决定、事项或统计情况的公报
+    reference: XX省公安厅环食药侦专项工作公报.docx
+    classification:
+      title_keywords: [公报]
+      recipient: forbidden
+      subtitle: optional
+      signature: required
+    format:
+      page:
+        margin_cm: { top: 2.54, bottom: 2.54, left: 3.17, right: 3.17 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: single
+        body_line_rule: single
+
+  announcement:
+    order: 5
+    label: 公告
+    description: 适用于向社会公开重要事项或法定事项的公告
+    reference: 广西壮族自治区公安厅关于委托下放保安服务公司设立及法定代表人变更审批权限的公告.docx
+    classification:
+      title_keywords: [公告]
+      recipient: forbidden
+      subtitle: optional
+      signature: required
+    format:
+      page:
+        margin_cm: { top: 2.54, bottom: 2.54, left: 3.17, right: 3.17 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: exact
+        title_line_pt: 32
+        body_line_rule: multiple
+        body_line_multiple: 1.0
+      styles:
+        body: { first_line_chars: 0 }
+        h1: { first_line_chars: 0 }
+        h2: { first_line_chars: 0 }
+        h3: { first_line_chars: 0 }
+        h4: { first_line_chars: 0 }
+
+  public_notice:
+    order: 6
+    label: 通告
+    description: 适用于在一定范围内公布应当遵守或周知事项的通告
+    reference: XX省公安厅通告.docx
+    classification:
+      title_keywords: [通告]
+      recipient: forbidden
+      subtitle: optional
+      signature: required
+      closing_phrases: [特此通告]
+    format:
+      page:
+        margin_cm: { top: 2.54, bottom: 2.54, left: 3.17, right: 3.17 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: single
+        body_line_rule: single
+      styles:
+        h1: { cn: 仿宋_GB2312, bold: false }
+
+  opinion:
+    order: 7
+    label: 意见
+    description: 适用于提出见解、处理办法或工作要求的意见
+    reference: 广西生态警务机制建设实施意见-20260624稿2(1).docx
+    classification:
+      title_keywords: [意见]
+      recipient: forbidden
+      subtitle: optional
+      signature: optional
+    format:
+      page:
+        margin_cm: { top: 2.54, bottom: 2.54, left: 3.17, right: 3.17 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: exact
+        title_line_pt: 32
+        body_line_rule: single
+
+  notice:
+    order: 8
+    label: 通知
+    description: 适用于发布、传达事项或要求下级机关执行的通知
+    reference: 广西壮族自治区公安厅办公室关于厅领导赴梧州市开展调研的通知.docx
+    classification:
+      title_keywords: [通知]
+      recipient: required
+      subtitle: optional
+      signature: required
+    format:
+      page:
+        margin_cm: { top: 2.54, bottom: 2.54, left: 3.17, right: 3.17 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: exact
+        title_line_pt: 32
+        body_line_rule: single
+
+  bulletin:
+    order: 9
+    label: 通报
+    description: 适用于表彰先进、批评错误或传达重要情况的通报
+    reference: 广西壮族自治区公安厅办公室关于近期全区涉警道路交通事故情况的通报.wps
+    classification:
+      title_keywords: [通报]
+      recipient: required
+      subtitle: optional
+      signature: required
+    format:
+      page:
+        margin_cm: { top: 3.70, bottom: 3.50, left: 2.80, right: 2.60 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: exact
+        title_line_pt: 32
+        body_line_rule: exact
+        body_line_pt: 28
+
+  report:
+    order: 10
+    label: 报告
+    description: 适用于向上级机关汇报工作、反映情况或回复询问的报告
+    reference: 广西壮族自治区公安厅知识产权犯罪侦查总队关于非标电缆案件侦办进展情况的报告.docx
+    classification:
+      title_keywords: [报告]
+      recipient: required
+      subtitle: optional
+      signature: required
+      closing_phrases: [特此报告]
+    format:
+      page:
+        margin_cm: { top: 3.70, bottom: 3.50, left: 2.80, right: 2.60 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: exact
+        title_line_pt: 32
+        body_line_rule: exact
+        body_line_pt: 28
+
+  request:
+    order: 11
+    label: 请示
+    description: 适用于向上级请求指示、批准事项的请示
+    reference: 关于挂牌督办“5.26”侵犯著作权案的请示.docx
+    classification:
+      title_keywords: [请示]
+      recipient: required
+      subtitle: optional
+      signature: required
+    format:
+      page:
+        margin_cm: { top: 3.70, bottom: 3.50, left: 2.80, right: 2.60 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: single
+        body_line_rule: exact
+        body_line_pt: 29
+
+  reply:
+    order: 12
+    label: 批复
+    description: 适用于答复下级机关请示事项的批复
+    reference: 广西壮族自治区公安厅关于同意开展2024年各类缴获毒品销毁的批复.docx
+    classification:
+      title_keywords: [批复]
+      recipient: required
+      subtitle: optional
+      signature: required
+      closing_phrases: [此复]
+    format:
+      page:
+        margin_cm: { top: 3.70, bottom: 2.54, left: 2.38, right: 2.80 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: exact
+        title_line_pt: 32
+        body_line_rule: single
+      styles:
+        body: { first_line_chars: 0 }
+        h1: { first_line_chars: 0 }
+        h2: { first_line_chars: 0 }
+        h3: { first_line_chars: 0 }
+        h4: { first_line_chars: 0 }
+
+  letter:
+    order: 13
+    label: 函
+    description: 适用于不相隶属机关之间商洽、询问或答复事项的函
+    reference: 关于赴江苏省公安厅环食药侦总队考察学习的函.docx
+    classification:
+      title_keywords: [函]
+      recipient: required
+      subtitle: optional
+      signature: required
+      closing_phrases: [此函, 望予支持为盼]
+    format:
+      page:
+        margin_cm: { top: 3.70, bottom: 3.50, left: 2.80, right: 2.60 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: exact
+        title_line_pt: 30
+        body_line_rule: exact
+        body_line_pt: 30
+      styles:
+        body: { first_line_chars: 0 }
+
+  proposal:
+    order: 14
+    label: 议案
+    description: 适用于按法定程序提请会议审议事项的议案
+    reference: 关于进一步强化全区环食药犯罪侦查工作的议案.docx
+    classification:
+      title_keywords: [议案]
+      recipient: forbidden
+      subtitle: optional
+      signature: required
+    format:
+      page:
+        margin_cm: { top: 2.54, bottom: 2.54, left: 3.17, right: 3.17 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: exact
+        title_line_pt: 32
+        body_line_rule: single
+
+  minutes:
+    order: 15
+    label: 纪要
+    description: 适用于记载会议主要情况和议定事项的纪要
+    reference: 广西壮族自治区公安厅第三十一次周例会会议纪要.wps
+    classification:
+      title_keywords: [纪要]
+      title_leading_lines: 0
+      recipient: forbidden
+      subtitle: optional
+      signature: optional
+    format:
+      page:
+        margin_cm: { top: 3.70, bottom: 3.50, left: 2.80, right: 2.60 }
+        header_cm: 1.50
+        footer_cm: 1.75
+      spacing:
+        title_line_rule: single
+        body_line_rule: exact
+        body_line_pt: 29
+      styles:
+        title: { size_pt: 36 }

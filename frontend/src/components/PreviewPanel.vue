@@ -27,6 +27,7 @@
               :data-order="p.index"
               :data-para-index="p.sourceIndex ?? p.index"
               :data-role="p.role"
+              :style="paragraphStyle(p)"
               :title="`${p.roleLabel} / 源段落 ${(p.sourceIndex ?? p.index) + 1}`"
             >
               <span class="doc-text">
@@ -78,6 +79,23 @@ function runStyle(run) {
   if (fonts.length) style.fontFamily = fonts.join(', ')
   if (run.size) style.fontSize = `${run.size}pt`
   if (run.bold !== null && run.bold !== undefined) style.fontWeight = run.bold ? '700' : '400'
+  return style
+}
+
+function paragraphStyle(paragraph) {
+  const layout = paragraph.layout || {}
+  const style = {}
+  const alignMap = { left: 'left', center: 'center', right: 'right', justify: 'justify', distribute: 'justify' }
+  if (layout.align) style.textAlign = alignMap[layout.align] || layout.align
+  if (layout.lineRule === 'exact' && layout.linePt) {
+    style.lineHeight = `${layout.linePt}pt`
+  } else if (layout.lineRule === 'multiple' && layout.lineMultiple) {
+    style.lineHeight = String(layout.lineMultiple)
+  }
+  if (layout.firstLineChars) style.textIndent = `${layout.firstLineChars}em`
+  else style.textIndent = '0'
+  if (layout.leftChars) style.marginLeft = `${layout.leftChars}em`
+  if (layout.rightChars) style.marginRight = `${layout.rightChars}em`
   return style
 }
 

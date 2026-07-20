@@ -1,6 +1,7 @@
 # Docker 镜像导出文件
 webword-*.tar
 webword-*.zip
+.rar
 
 # 前端依赖与构建产物
 node_modules/

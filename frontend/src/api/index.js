@@ -17,13 +17,18 @@ export function getFormatConfig() {
 }
 
 /** 识别结构清单（带置信度），供人工校正 */
-export function getStructure(fileId) {
-  return api.get(`/structure/${fileId}`)
+export function getStructure(fileId, templateId) {
+  return api.get(`/structure/${fileId}`, {
+    params: { template_id: templateId || undefined },
+  })
 }
 
-/** 按人工校正后的类型套格式。roles: { 逻辑段索引: 角色 } */
-export function convertFile(fileId, roles) {
-  return api.post(`/convert/${fileId}`, { roles: roles || null })
+/** 按文种模板与人工校正后的类型套格式。roles: { 逻辑段索引: 角色 } */
+export function convertFile(fileId, roles, templateId) {
+  return api.post(`/convert/${fileId}`, {
+    roles: roles || null,
+    template_id: templateId || null,
+  })
 }
 
 /** 预览处理结果 */
