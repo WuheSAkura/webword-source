@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Local Run"
+  short_description: "Start and diagnose this local gongwen stack."
+  default_prompt: "Start or restart the gongwen local frontend and backend, inspect logs and ports, and record any new recurring error with its solution."

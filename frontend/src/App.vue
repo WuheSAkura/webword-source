@@ -73,6 +73,7 @@
         />
       </div>
     </div>
+    <AiWritingAssistant @generated="handleAiGenerated" />
   </div>
 </template>
 
@@ -83,6 +84,7 @@ import FileList from './components/FileList.vue'
 import StructurePanel from './components/StructurePanel.vue'
 import PreviewPanel from './components/PreviewPanel.vue'
 import ActionPanel from './components/ActionPanel.vue'
+import AiWritingAssistant from './components/AiWritingAssistant.vue'
 import {
   uploadFiles, getStructure, getFormatConfig, previewResult,
   convertFile, downloadFile, editFile, undoFile, clearAll,
@@ -196,6 +198,39 @@ async function handleUpload(files) {
   } catch (err) {
     ElMessage.error('上传失败: ' + (err.response?.data?.detail || err.message))
   }
+}
+
+async function handleAiGenerated(payload) {
+  const generatedFiles = payload?.files || []
+  if (!generatedFiles.length) return
+  const documents = payload?.documents || []
+  for (const item of generatedFiles) {
+    const existingIndex = fileList.value.findIndex(file => file.id === item.id)
+    const entry = { ...item, status: 'completed', templateId: item.templateId || defaultTemplateId.value }
+    if (existingIndex >= 0) fileList.value.splice(existingIndex, 1, entry)
+    else fileList.value.unshift(entry)
+
+    const document = documents.find(doc => doc.fileId === item.id || doc.documentId === item.documentId)
+    if (document?.paragraphs) {
+      const cachedPreview = {
+        success: true,
+        name: item.name,
+        paragraphs: document.paragraphs,
+      }
+      getCache(item.id).structure = {
+        ...cachedPreview,
+        templateId: entry.templateId,
+      }
+      getCache(item.id).result = {
+        ...cachedPreview,
+        type: 'processed',
+      }
+    }
+  }
+  await selectFile(generatedFiles[0].id)
+  activeTab.value = 'result'
+  if (!getCache(generatedFiles[0].id).result) await loadResultData(generatedFiles[0].id)
+  refreshDisplay(generatedFiles[0].id)
 }
 
 async function selectFile(fid) {

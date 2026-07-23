@@ -7,6 +7,9 @@ frontend/dist
 backend/__pycache__
 backend/temp
 backend/static
+backend/template_library.db
+.codex-runlogs
+~$*
 厅机关公文格式基本要求.docx
 webword-*.zip
 webword-*.tar

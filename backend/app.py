@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import datetime
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -33,6 +33,18 @@ from converter import (
     split_paragraph_text,
     apply_local_edit,
 )
+from ai_writer import (
+    MAX_AI_UPLOAD_SIZE,
+    REFERENCE_SUFFIXES,
+    SUPPORTED_INPUT_SUFFIXES,
+    generate_document,
+    generate_documents,
+    get_template_by_id,
+    get_model_config,
+    save_model_config,
+    scan_template_library,
+    sync_template_library,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMP_DIR = BASE_DIR / "temp"
@@ -43,6 +55,7 @@ MAX_FILE_SIZE = 20 * 1024 * 1024
 # { file_id: {path, name, size, processed, result_id, result_path,
 #              roles, template_id, log, undo_stack} }
 uploaded_files: dict[str, dict] = {}
+generated_ai_documents: dict[str, dict] = {}
 
 
 class ConvertRequest(BaseModel):
@@ -54,6 +67,13 @@ class EditRequest(BaseModel):
     selection: dict
     font: dict | None = None
     paragraph: dict | None = None
+
+
+class AiModelConfigRequest(BaseModel):
+    request_url: str = ""
+    api_key: str = ""
+    model_name: str = ""
+    models: list[str] | None = None
 
 
 def cleanup_old_files(max_age_minutes: int = 30):
@@ -73,6 +93,7 @@ def cleanup_old_files(max_age_minutes: int = 30):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cleanup_old_files()
+    sync_template_library()
     yield
 
 
@@ -111,6 +132,39 @@ def _clear_result_artifacts(info: dict) -> None:
     for undo_path in info.get("undo_stack") or []:
         _delete_file(undo_path)
     info["undo_stack"] = []
+
+
+def _register_ai_document_for_converter(document: dict) -> dict:
+    result_path = Path(document["path"])
+    file_id = uuid.uuid4().hex
+    source_path = TEMP_DIR / f"{file_id}_ai_source.docx"
+    shutil.copyfile(result_path, source_path)
+    file_size = result_path.stat().st_size if result_path.exists() else source_path.stat().st_size
+    template_id = normalize_template_id(document.get("templateId"))
+    roles = {
+        str(item.get("index")): item.get("role")
+        for item in document.get("paragraphs", [])
+        if item.get("index") is not None and item.get("role")
+    }
+    uploaded_files[file_id] = {
+        "path": source_path,
+        "name": document.get("filename") or "AI公文.docx",
+        "size": file_size,
+        "processed": True,
+        "result_id": document["documentId"],
+        "result_path": str(result_path),
+        "roles": roles,
+        "template_id": template_id,
+        "log": ["AI 生成结果已自动同步到公文格式转换工具"],
+        "undo_stack": [],
+    }
+    return {
+        "id": file_id,
+        "name": uploaded_files[file_id]["name"],
+        "size": file_size,
+        "templateId": template_id,
+        "documentId": document["documentId"],
+    }
 
 
 def build_result_preview(file_path: str, roles: dict | None = None,
@@ -230,6 +284,159 @@ async def get_format_config():
         "defaultTemplateId": default_template_id,
         "templates": get_template_catalog(),
     }
+
+
+@app.get("/api/ai/templates")
+async def get_ai_templates():
+    """返回 AI 写作可参考的模板库索引。"""
+    return {"success": True, "templates": scan_template_library()}
+
+
+@app.post("/api/ai/templates/sync")
+async def sync_ai_templates():
+    templates = sync_template_library()
+    return {"success": True, "count": len(templates), "templates": templates}
+
+
+def _unique_target_path(directory: Path, filename: str) -> Path:
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    candidate = directory / filename
+    index = 1
+    while candidate.exists():
+        candidate = directory / f"{stem}_{index}{suffix}"
+        index += 1
+    return candidate
+
+
+@app.post("/api/ai/templates/upload")
+async def upload_ai_templates(
+    files: list[UploadFile] = File(...),
+    template_id: str = Form(default=""),
+):
+    if not template_id:
+        raise HTTPException(400, detail="请先选择一个具体公文模板类别")
+    template = get_template_by_id(template_id)
+    if not template:
+        raise HTTPException(400, detail="未找到对应模板类别")
+
+    target_dir = Path(template["sourceDir"])
+    target_dir.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for file in files:
+        filename = Path(file.filename or "").name
+        suffix = Path(filename).suffix.lower()
+        if not filename or filename.startswith("~$") or suffix not in REFERENCE_SUFFIXES:
+            continue
+        content = await file.read()
+        if len(content) > MAX_AI_UPLOAD_SIZE:
+            raise HTTPException(400, detail=f"{filename} 超过 30MB")
+        target_path = _unique_target_path(target_dir, filename)
+        with open(target_path, "wb") as f:
+            f.write(content)
+        saved.append(target_path.name)
+
+    templates = sync_template_library()
+    return {
+        "success": True,
+        "templateId": template_id,
+        "saved": saved,
+        "count": len(saved),
+        "templates": templates,
+    }
+
+
+@app.get("/api/ai/model-config")
+async def get_ai_model_config():
+    return {"success": True, **get_model_config()}
+
+
+@app.post("/api/ai/model-config")
+async def update_ai_model_config(payload: AiModelConfigRequest):
+    config = save_model_config(
+        request_url=payload.request_url,
+        api_key=payload.api_key,
+        model_name=payload.model_name,
+        models=payload.models,
+    )
+    return {"success": True, **config}
+
+
+@app.post("/api/ai/generate")
+async def generate_ai_document(
+    files: list[UploadFile] = File(default=[]),
+    prompt: str = Form(default=""),
+    request_url: str = Form(default=""),
+    api_key: str = Form(default=""),
+    model_name: str = Form(default=""),
+    template_id: str | None = Form(default=None),
+    temperature: float = Form(default=0.2),
+):
+    """根据上传材料、用户要求和模板库生成带公文格式的 docx。"""
+    saved_paths: list[Path] = []
+    try:
+        for file in files:
+            suffix = Path(file.filename or "").suffix.lower()
+            if suffix not in SUPPORTED_INPUT_SUFFIXES:
+                continue
+            content = await file.read()
+            if len(content) > MAX_AI_UPLOAD_SIZE:
+                raise HTTPException(400, detail=f"{file.filename} 超过 30MB")
+            input_id = uuid.uuid4().hex
+            fpath = TEMP_DIR / f"{input_id}{suffix}"
+            with open(fpath, "wb") as f:
+                f.write(content)
+            saved_paths.append(fpath)
+
+        result = generate_documents(
+            prompt=prompt,
+            upload_paths=saved_paths,
+            request_url=request_url,
+            api_key=api_key,
+            model_name=model_name,
+            template_id=template_id,
+            temperature=temperature,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=f"AI 公文生成失败：{str(e)}")
+
+    synced_files = []
+    for document in result.get("documents", [result]):
+        generated_ai_documents[document["documentId"]] = document
+        synced_file = _register_ai_document_for_converter(document)
+        document["fileId"] = synced_file["id"]
+        synced_files.append(synced_file)
+    document_id = result["documentId"]
+    return {
+        "success": True,
+        "documentId": document_id,
+        "fileId": synced_files[0]["id"] if synced_files else "",
+        "filename": result["filename"],
+        "templateId": result["templateId"],
+        "templateName": result["templateName"],
+        "preview": result["preview"],
+        "paragraphs": result["paragraphs"],
+        "documents": result.get("documents", [result]),
+        "files": synced_files,
+        "warnings": result["warnings"],
+    }
+
+
+@app.get("/api/ai/download/{document_id}")
+async def download_ai_document(document_id: str):
+    info = generated_ai_documents.get(document_id)
+    if not info:
+        raise HTTPException(404, detail="AI 生成结果不存在或已过期")
+    path = Path(info["path"])
+    if not path.exists():
+        raise HTTPException(404, detail="AI 生成文件不存在")
+    return FileResponse(
+        path=path,
+        filename=info["filename"],
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
 
 
 @app.post("/api/upload")

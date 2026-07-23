@@ -20,6 +20,7 @@ COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/ ./backend/
+COPY ["20260623--整理汇总常用公文及范例（环食药侦）", "./20260623--整理汇总常用公文及范例（环食药侦）"]
 COPY --from=frontend-build /app/frontend/dist ./backend/static
 
 WORKDIR /app/backend
