@@ -47,7 +47,6 @@
           :selectedFile="selectedFile"
           :resultData="resultData"
           :loading="previewLoading"
-          @selectRange="handleSelectRange"
         />
       </div>
 
@@ -60,15 +59,10 @@
           :completedCount="completedCount"
           :processingCount="processingCount"
           :pendingCount="pendingCount"
-          :selection="selectionRange"
-          :styles="selectedTemplateStyles"
-          :labels="roleLabels"
           :templates="templateOptions"
           :selectedTemplateId="selectedTemplateId"
           @process="handleProcess"
           @download="handleDownload"
-          @applyEdit="handleApplyEdit"
-          @undoEdit="handleUndoEdit"
           @changeTemplate="handleChangeTemplate"
         />
       </div>
@@ -87,7 +81,7 @@ import ActionPanel from './components/ActionPanel.vue'
 import AiWritingAssistant from './components/AiWritingAssistant.vue'
 import {
   uploadFiles, getStructure, getFormatConfig, previewResult,
-  convertFile, downloadFile, editFile, undoFile, clearAll,
+  convertFile, downloadFile, clearAll,
 } from './api/index.js'
 
 const fileList = ref([])
@@ -96,8 +90,6 @@ const activeTab = ref('structure')
 const structureData = ref(null)
 const resultData = ref(null)
 const previewLoading = ref(false)
-const selectionRange = ref(null)
-const roleStyles = ref({})
 const roleLabels = ref({})
 const templateOptions = ref([])
 const defaultTemplateId = ref('generic')
@@ -111,10 +103,6 @@ const pendingCount = computed(() => fileList.value.filter(f => f.status === 'pen
 
 const selectedFile = computed(() => fileList.value.find(f => f.id === selectedId.value) || null)
 const selectedTemplateId = computed(() => selectedFile.value?.templateId || defaultTemplateId.value)
-const selectedTemplateStyles = computed(() => {
-  const template = templateOptions.value.find(item => item.id === selectedTemplateId.value)
-  return template?.styles || roleStyles.value
-})
 const isSelectedCompleted = computed(() => selectedFile.value?.status === 'completed')
 const isSelectedProcessing = computed(() => selectedFile.value?.status === 'processing')
 const resultAvailable = computed(() => !!resultData.value || selectedFile.value?.status === 'completed')
@@ -123,7 +111,6 @@ onMounted(async () => {
   try {
     const res = await getFormatConfig()
     if (res.data.success) {
-      roleStyles.value = res.data.styles || {}
       roleLabels.value = res.data.labels || {}
       defaultTemplateId.value = res.data.defaultTemplateId || 'generic'
       templateOptions.value = res.data.templates || []
@@ -235,7 +222,6 @@ async function handleAiGenerated(payload) {
 
 async function selectFile(fid) {
   selectedId.value = fid
-  selectionRange.value = null
   activeTab.value = 'structure'
   if (!getCache(fid).structure) await loadStructure(fid)
   refreshDisplay(fid)
@@ -250,7 +236,6 @@ async function handleRemove(fid) {
     selectedId.value = fileList.value[0]?.id || null
     structureData.value = null
     resultData.value = null
-    selectionRange.value = null
     if (selectedId.value) await selectFile(selectedId.value)
   }
 }
@@ -281,7 +266,6 @@ async function handleChangeTemplate(templateId) {
   c.result = null
   structureData.value = null
   resultData.value = null
-  selectionRange.value = null
   activeTab.value = 'structure'
   await loadStructure(file.id)
 }
@@ -298,7 +282,6 @@ async function processOneFile(targetId, showMessage = true) {
       const pr = await previewResult(targetId)
       getCache(targetId).result = pr.data
       if (selectedId.value === targetId) {
-        selectionRange.value = null
         activeTab.value = 'result'
         refreshDisplay(targetId)
       }
@@ -346,58 +329,12 @@ async function handleDownload(fid) {
   } catch { ElMessage.error('下载失败') }
 }
 
-function handleSelectRange(selection) { selectionRange.value = selection }
-
-async function handleApplyEdit(payload) {
-  const targetId = selectedId.value
-  if (!targetId || !selectionRange.value) {
-    ElMessage.warning('请先在处理后预览中选中文字')
-    return
-  }
-  try {
-    const res = await editFile(targetId, {
-      selection: selectionRange.value,
-      font: payload.font,
-      paragraph: payload.paragraph,
-    })
-    const c = getCache(targetId)
-    c.result = { ...(c.result || { success: true, name: selectedFile.value?.name, type: 'processed' }), paragraphs: res.data.paragraphs }
-    activeTab.value = 'result'
-    refreshDisplay(targetId)
-    selectionRange.value = null
-    window.getSelection()?.removeAllRanges()
-    ElMessage.success('修改已应用')
-  } catch (err) {
-    const detail = err.response?.data?.detail || err.message
-    ElMessage.error(String(detail).includes('文件不存在')
-      ? '应用修改失败：后端文件已过期，请重新上传并处理'
-      : '应用修改失败: ' + detail)
-  }
-}
-
-async function handleUndoEdit() {
-  const targetId = selectedId.value
-  if (!targetId) return
-  try {
-    const res = await undoFile(targetId)
-    const c = getCache(targetId)
-    c.result = { ...(c.result || { success: true, name: selectedFile.value?.name, type: 'processed' }), paragraphs: res.data.paragraphs }
-    activeTab.value = 'result'
-    refreshDisplay(targetId)
-    selectionRange.value = null
-    ElMessage.success('已撤销上一步修改')
-  } catch (err) {
-    ElMessage.error('撤销失败: ' + (err.response?.data?.detail || err.message))
-  }
-}
-
 async function handleClearAll() {
   try { await clearAll() } catch {}
   fileList.value = []
   selectedId.value = null
   structureData.value = null
   resultData.value = null
-  selectionRange.value = null
   cache.value = {}
 }
 </script>

@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from docx import Document
+from docx.oxml.ns import qn
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
 from config import get_template_catalog, normalize_template_id
 from converter import build_structure, convert_with_roles
@@ -38,6 +41,7 @@ SUMMARY_TRIGGER_CHAR_LIMIT = 12000
 SUMMARY_CHUNK_CHAR_LIMIT = 7000
 SUMMARY_CHUNK_OVERLAP = 350
 MAX_AGGREGATED_SUMMARY_CHARS = 22000
+READ_REPORT_SAMPLE_LIMIT = 20
 
 SUPPORTED_INPUT_SUFFIXES = {".docx", ".txt"}
 REFERENCE_SUFFIXES = {".docx", ".txt", ".wps"}
@@ -147,13 +151,184 @@ def legacy_extract_text(path: Path, limit: int = 12000) -> str:
     return text[:limit] + ("\n...[内容已截断]" if len(text) > limit else "")
 
 
-def extract_text(path: Path, limit: int | None = DIRECT_DRAFT_CHAR_LIMIT) -> str:
+def _new_stats() -> dict[str, int]:
+    return {
+        "bodyParagraphs": 0,
+        "tables": 0,
+        "tableRows": 0,
+        "tableCells": 0,
+        "headers": 0,
+        "footers": 0,
+        "images": 0,
+        "chars": 0,
+        "items": 0,
+    }
+
+
+def _add_inventory_item(
+    items: list[dict[str, Any]],
+    stats: dict[str, int],
+    source_type: str,
+    location: str,
+    text: str,
+) -> None:
+    clean = " ".join(text.replace("\r", "\n").split()) if source_type == "table" else text.strip()
+    if not clean:
+        return
+    index = len(items) + 1
+    item = {
+        "id": f"{source_type}.{index}",
+        "sourceType": source_type,
+        "location": location,
+        "text": clean,
+        "charCount": len(clean),
+    }
+    items.append(item)
+    stats["chars"] += item["charCount"]
+    stats["items"] = len(items)
+
+
+def _iter_body_blocks(doc):
+    table_index = 0
+    paragraph_index = 0
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            paragraph_index += 1
+            yield "paragraph", paragraph_index, Paragraph(child, doc)
+        elif child.tag == qn("w:tbl"):
+            table_index += 1
+            yield "table", table_index, Table(child, doc)
+
+
+def _read_header_footer(container, source_type: str, section_index: int, variant: str,
+                        items: list[dict[str, Any]], stats: dict[str, int]) -> None:
+    seen = set()
+    for index, paragraph in enumerate(container.paragraphs, start=1):
+        text = paragraph.text.strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        _add_inventory_item(
+            items,
+            stats,
+            source_type,
+            f"section {section_index} {variant} paragraph {index}",
+            text,
+        )
+        stats["headers" if source_type == "header" else "footers"] += 1
+
+
+def _collect_docx_inventory(path: Path) -> dict[str, Any]:
+    doc = Document(str(path))
+    items: list[dict[str, Any]] = []
+    stats = _new_stats()
+    warnings: list[str] = []
+
+    for block_type, block_index, block in _iter_body_blocks(doc):
+        if block_type == "paragraph":
+            text = block.text.strip()
+            if text:
+                _add_inventory_item(items, stats, "body", f"paragraph {block_index}", text)
+                stats["bodyParagraphs"] += 1
+        elif block_type == "table":
+            stats["tables"] += 1
+            stats["tableRows"] += len(block.rows)
+            for row_index, row in enumerate(block.rows, start=1):
+                for cell_index, cell in enumerate(row.cells, start=1):
+                    stats["tableCells"] += 1
+                    cell_text = "\n".join(p.text.strip() for p in cell.paragraphs if p.text.strip())
+                    if cell_text.strip():
+                        _add_inventory_item(
+                            items,
+                            stats,
+                            "table",
+                            f"table {block_index} row {row_index} cell {cell_index}",
+                            cell_text,
+                        )
+
+    for section_index, section in enumerate(doc.sections, start=1):
+        for variant, header in (
+            ("default", section.header),
+            ("first", section.first_page_header),
+            ("even", section.even_page_header),
+        ):
+            _read_header_footer(header, "header", section_index, variant, items, stats)
+        for variant, footer in (
+            ("default", section.footer),
+            ("first", section.first_page_footer),
+            ("even", section.even_page_footer),
+        ):
+            _read_header_footer(footer, "footer", section_index, variant, items, stats)
+
+    stats["images"] = len(doc.inline_shapes)
+    if stats["images"]:
+        warnings.append(f"检测到 {stats['images']} 张图片，当前未抽取图片内文字；如材料是扫描件，生成结果可能遗漏图片内容。")
+    if not items and stats["images"]:
+        warnings.append("文档未抽取到可读文本且包含图片，疑似扫描件或图片版材料。")
+
+    return {"items": items, "stats": stats, "warnings": warnings}
+
+
+def _collect_txt_inventory(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    items: list[dict[str, Any]] = []
+    stats = _new_stats()
+    for index, line in enumerate(text.splitlines(), start=1):
+        if line.strip():
+            _add_inventory_item(items, stats, "text", f"line {index}", line)
+    return {"items": items, "stats": stats, "warnings": []}
+
+
+def extract_document_inventory(path: Path) -> dict[str, Any]:
     suffix = path.suffix.lower()
     if suffix == ".docx":
-        doc = Document(str(path))
-        text = "\n".join(p.text.strip() for p in doc.paragraphs if p.text.strip())
-    elif suffix == ".txt":
-        text = path.read_text(encoding="utf-8", errors="ignore")
+        return _collect_docx_inventory(path)
+    if suffix == ".txt":
+        return _collect_txt_inventory(path)
+
+    stats = _new_stats()
+    warning = f"Unsupported input file type: {suffix}. Convert it to docx or txt first."
+    return {"items": [], "stats": stats, "warnings": [warning]}
+
+
+def inventory_to_text(inventory: dict[str, Any]) -> str:
+    lines = []
+    for item in inventory.get("items", []):
+        lines.append(f"[{item['id']} | {item['sourceType']} | {item['location']}]\n{item['text']}")
+    return "\n\n".join(lines).strip()
+
+
+def build_read_report(inventory: dict[str, Any], chunks: list[str] | None = None) -> dict[str, Any]:
+    stats = dict(inventory.get("stats") or _new_stats())
+    sample_items = []
+    for item in inventory.get("items", [])[:READ_REPORT_SAMPLE_LIMIT]:
+        sample_items.append({
+            "id": item["id"],
+            "sourceType": item["sourceType"],
+            "location": item["location"],
+            "charCount": item["charCount"],
+            "text": item["text"][:120] + ("..." if len(item["text"]) > 120 else ""),
+        })
+    return {
+        "stats": stats,
+        "warnings": list(inventory.get("warnings") or []),
+        "sampleItems": sample_items,
+        "chunkCount": len(chunks or []),
+        "chunkSources": [
+            {
+                "index": index,
+                "charCount": len(chunk),
+                "sourceIds": _source_ids_in_text(chunk),
+            }
+            for index, chunk in enumerate(chunks or [], start=1)
+        ],
+    }
+
+
+def extract_text(path: Path, limit: int | None = DIRECT_DRAFT_CHAR_LIMIT) -> str:
+    suffix = path.suffix.lower()
+    if suffix in SUPPORTED_INPUT_SUFFIXES:
+        text = inventory_to_text(extract_document_inventory(path))
     else:
         text = f"Unsupported input file type: {suffix}. Convert it to docx or txt first."
     text = text.strip()
@@ -176,6 +351,17 @@ def chunk_text(text: str, chunk_size: int = SUMMARY_CHUNK_CHAR_LIMIT,
             break
         start = max(end - overlap, start + 1)
     return chunks
+
+
+def _source_ids_in_text(text: str) -> list[str]:
+    ids = []
+    for part in text.split("["):
+        if "]" not in part:
+            continue
+        source_id = part.split("]", 1)[0].split("|", 1)[0].strip()
+        if source_id and source_id not in ids:
+            ids.append(source_id)
+    return ids
 
 
 def fallback_summary(text: str, limit: int = 1800) -> str:
@@ -210,7 +396,8 @@ def summarize_chunk(
         f"User request: {prompt or 'Draft an official document from the material.'}\n"
         f"Source chunk {index}/{total}:\n{text}\n\n"
         "Return a dense Chinese summary with bullet-like short paragraphs. "
-        "Keep all facts that may affect the final document."
+        "Keep all facts that may affect the final document. Preserve source "
+        "ids such as [body.1], [table.4], [header.8] when mentioning facts."
     )
     return call_chat_model(
         request_url=request_url,
@@ -231,10 +418,12 @@ def prepare_material(
     force_summary: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
     name = display_name_from_temp_path(path)
-    full_text = extract_text(path, limit=None)
-    warnings: list[str] = []
+    inventory = extract_document_inventory(path)
+    full_text = inventory_to_text(inventory)
+    warnings: list[str] = list(inventory.get("warnings") or [])
     chunks = chunk_text(full_text)
     should_summarize = force_summary or len(full_text) > SUMMARY_TRIGGER_CHAR_LIMIT or len(chunks) > 1
+    read_report = build_read_report(inventory, chunks)
 
     if not should_summarize:
         return {
@@ -243,6 +432,7 @@ def prepare_material(
             "fullTextLength": len(full_text),
             "chunkCount": 1 if full_text else 0,
             "processingMode": "direct",
+            "readReport": read_report,
         }, warnings
 
     chunk_summaries = []
@@ -282,6 +472,7 @@ def prepare_material(
         "fullTextLength": len(full_text),
         "chunkCount": len(chunks),
         "processingMode": "summary_first",
+        "readReport": read_report,
     }, warnings
 
 
@@ -678,9 +869,10 @@ def generate_document(
         "templateId": resolved_template_id,
         "templateName": template["name"] if template else "",
         "preview": draft[:3000],
-        "paragraphs": paragraphs,
-        "warnings": warnings,
-    }
+            "paragraphs": paragraphs,
+            "warnings": warnings,
+            "readReport": materials[0].get("readReport") if materials else build_read_report({"items": [], "stats": _new_stats(), "warnings": []}),
+        }
 
 
 def generate_documents(
@@ -707,12 +899,14 @@ def generate_documents(
         warnings: list[str] = []
         template_label = template["label"] if template else resolved_template_id
         if material["path"] is None:
+            empty_report = build_read_report({"items": [], "stats": _new_stats(), "warnings": []})
             current_materials = [{
                 "name": material["name"],
                 "text": material["text"],
                 "fullTextLength": len(material["text"]),
                 "chunkCount": 0,
                 "processingMode": "direct",
+                "readReport": empty_report,
             }]
         else:
             prepared_material, material_warnings = prepare_material(
@@ -756,6 +950,7 @@ def generate_documents(
             "processingMode": current_materials[0].get("processingMode", "direct"),
             "fullTextLength": current_materials[0].get("fullTextLength", 0),
             "chunkCount": current_materials[0].get("chunkCount", 0),
+            "readReport": current_materials[0].get("readReport"),
         })
 
     first = documents[0]

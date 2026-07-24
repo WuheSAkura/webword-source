@@ -10,56 +10,52 @@
           {{ item.label }} {{ item.count }}
         </span>
       </div>
+      <div class="summary-actions">
+        <el-button size="small" :loading="docxLoading" @click="renderPreview">刷新预览</el-button>
+        <el-button size="small" type="primary" :disabled="!previewObjectUrl" @click="downloadPreviewDocx">下载DOCX</el-button>
+      </div>
     </div>
 
-    <div class="preview-body" v-loading="loading">
+    <div class="preview-body" v-loading="loading || docxLoading">
       <el-empty v-if="!selectedFile" description="选择左侧文件即可预览" :image-size="90" />
       <el-empty v-else-if="loading" description="加载中..." :image-size="60" />
       <el-empty v-else-if="!resultData || !resultData.paragraphs" description="尚未套用格式" :image-size="60" />
-      <template v-else>
-        <div class="document-canvas">
-          <div class="document-page result-page" @mouseup="captureSelection" @keyup="captureSelection">
-            <div
-              v-for="p in resultData.paragraphs"
-              :key="p.index"
-              class="doc-paragraph"
-              :class="'role-' + p.role"
-              :data-order="p.index"
-              :data-para-index="p.sourceIndex ?? p.index"
-              :data-role="p.role"
-              :style="paragraphStyle(p)"
-              :title="`${p.roleLabel} / 源段落 ${(p.sourceIndex ?? p.index) + 1}`"
-            >
-              <span class="doc-text">
-                <span
-                  v-for="(run, runIndex) in paragraphRuns(p)"
-                  :key="runIndex"
-                  :style="runStyle(run)"
-                >{{ run.text }}</span>
-              </span>
-            </div>
-          </div>
-        </div>
-      </template>
+      <div v-else class="docx-stage">
+        <el-alert
+          v-if="previewError"
+          :title="previewError"
+          type="warning"
+          show-icon
+          :closable="false"
+        />
+        <iframe ref="previewFrame" class="docx-frame" title="DOCX 预览" />
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { renderAsync } from 'docx-preview'
+import { downloadFile } from '../api'
 
 const props = defineProps({
   selectedFile: Object,
   resultData: Object,
   loading: Boolean,
 })
-const emit = defineEmits(['selectRange'])
 
 const roleLabels = {
   title: '标题', subtitle: '副标题', recipient: '发文对象', body: '正文', h1: '一级标题', h2: '二级标题',
   h3: '三级标题', h4: '四级标题', attachment_head: '附件头', attachment_other: '其他附件', sign_unit: '落款·单位',
   sign_date: '落款·日期', sign_contact: '落款·联系人', security: '涉密标识', other: '其他',
 }
+
+const previewFrame = ref(null)
+const docxLoading = ref(false)
+const previewError = ref('')
+const previewObjectUrl = ref('')
+let renderRequestId = 0
 
 const paragraphCount = computed(() => props.resultData?.paragraphs?.length || 0)
 
@@ -69,106 +65,138 @@ const roleCounts = computed(() => {
   return Array.from(map.entries()).map(([role, count]) => ({ role, count, label: roleLabels[role] || role }))
 })
 
-function paragraphRuns(paragraph) {
-  return paragraph.runs?.length ? paragraph.runs : [{ text: paragraph.fullText }]
-}
+watch(
+  () => [props.selectedFile?.id, props.resultData?.paragraphs],
+  () => {
+    if (props.selectedFile?.id && props.resultData?.paragraphs) renderPreview()
+    else clearPreview()
+  },
+  { immediate: true },
+)
 
-function runStyle(run) {
-  const style = {}
-  const fonts = fontFamilyList(run.fontEast, run.fontWest)
-  if (fonts.length) style.fontFamily = fonts.join(', ')
-  if (run.size) style.fontSize = `${run.size}pt`
-  if (run.bold !== null && run.bold !== undefined) style.fontWeight = run.bold ? '700' : '400'
-  return style
-}
+async function renderPreview() {
+  if (!props.selectedFile?.id || !props.resultData?.paragraphs) return
+  const requestId = ++renderRequestId
+  docxLoading.value = true
+  previewError.value = ''
+  await nextTick()
+  const root = preparePreviewFrame()
 
-function paragraphStyle(paragraph) {
-  const layout = paragraph.layout || {}
-  const style = {}
-  const alignMap = { left: 'left', center: 'center', right: 'right', justify: 'justify', distribute: 'justify' }
-  if (layout.align) style.textAlign = alignMap[layout.align] || layout.align
-  if (layout.lineRule === 'exact' && layout.linePt) {
-    style.lineHeight = `${layout.linePt}pt`
-  } else if (layout.lineRule === 'multiple' && layout.lineMultiple) {
-    style.lineHeight = String(layout.lineMultiple)
-  }
-  if (layout.firstLineChars) style.textIndent = `${layout.firstLineChars}em`
-  else style.textIndent = '0'
-  if (layout.leftChars) style.marginLeft = `${layout.leftChars}em`
-  if (layout.rightChars) style.marginRight = `${layout.rightChars}em`
-  return style
-}
-
-function quoteFont(name) { return `"${String(name).replace(/"/g, '')}"` }
-
-function fontFamilyList(east, west) {
-  const eastName = east || ''
-  const fallbackMap = [
-    { test: '小标宋', fonts: ['方正小标宋简体', 'FZXiaoBiaoSong-B05S', 'SimSun', '宋体'] },
-    { test: '黑体', fonts: ['黑体', 'SimHei', 'Microsoft YaHei'] },
-    { test: '楷体', fonts: ['楷体_GB2312', '楷体', 'KaiTi_GB2312', 'KaiTi', 'STKaiti'] },
-    { test: '仿宋', fonts: ['仿宋_GB2312', '仿宋', 'FangSong_GB2312', 'FangSong', 'STFangsong'] },
-    { test: '宋体', fonts: ['宋体', 'SimSun'] },
-  ]
-  const matched = fallbackMap.find(item => eastName.includes(item.test))
-  const fonts = matched ? matched.fonts : (eastName ? [eastName] : [])
-  if (west) fonts.push(west)
-  return Array.from(new Set(fonts)).map(quoteFont)
-}
-
-function findTextSpan(node) {
-  let cur = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement
-  while (cur && !cur.classList?.contains('doc-text')) cur = cur.parentElement
-  return cur
-}
-
-function offsetInSpan(container, offset, span) {
-  const range = document.createRange()
-  range.selectNodeContents(span)
   try {
-    range.setEnd(container, offset)
-    return range.toString().length
-  } catch {
-    return 0
+    const res = await downloadFile(props.selectedFile.id)
+    if (requestId !== renderRequestId) return
+    const blob = new Blob([res.data], {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    })
+    setPreviewObjectUrl(URL.createObjectURL(blob))
+    await renderAsync(blob, root, root, {
+      className: 'docx',
+      inWrapper: true,
+      breakPages: true,
+      ignoreWidth: false,
+      ignoreHeight: false,
+      ignoreFonts: false,
+      ignoreLastRenderedPageBreak: false,
+      renderHeaders: true,
+      renderFooters: true,
+      renderFootnotes: true,
+      renderEndnotes: true,
+      renderComments: false,
+      experimental: true,
+    })
+    adjustPreviewFrameHeight()
+    setTimeout(adjustPreviewFrameHeight, 200)
+    setTimeout(adjustPreviewFrameHeight, 800)
+  } catch (error) {
+    if (requestId !== renderRequestId) return
+    clearPreview(false, false)
+    previewError.value = error?.response?.data?.detail || error?.message || '预览生成失败，请下载文件查看'
+  } finally {
+    if (requestId === renderRequestId) docxLoading.value = false
   }
 }
 
-function captureSelection() {
-  const selection = window.getSelection()
-  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return
-  const anchorSpan = findTextSpan(selection.anchorNode)
-  const focusSpan = findTextSpan(selection.focusNode)
-  if (!anchorSpan || !focusSpan) return
-  const anchorPara = anchorSpan.closest('.doc-paragraph')
-  const focusPara = focusSpan.closest('.doc-paragraph')
-  if (!anchorPara || !focusPara) return
-
-  const anchor = {
-    order: Number(anchorPara.dataset.order),
-    paragraph: Number(anchorPara.dataset.paraIndex),
-    role: anchorPara.dataset.role,
-    offset: offsetInSpan(selection.anchorNode, selection.anchorOffset, anchorSpan),
-  }
-  const focus = {
-    order: Number(focusPara.dataset.order),
-    paragraph: Number(focusPara.dataset.paraIndex),
-    role: focusPara.dataset.role,
-    offset: offsetInSpan(selection.focusNode, selection.focusOffset, focusSpan),
-  }
-  let start = anchor, end = focus
-  if (anchor.order > focus.order || (anchor.order === focus.order && anchor.offset > focus.offset)) {
-    start = focus; end = anchor
-  }
-  if (start.paragraph === end.paragraph && start.offset === end.offset) return
-  emit('selectRange', {
-    startParagraph: start.paragraph,
-    startOffset: start.offset,
-    endParagraph: end.paragraph,
-    endOffset: end.offset,
-    role: start.role,
-    text: selection.toString(),
-  })
+function downloadPreviewDocx() {
+  if (!previewObjectUrl.value) return
+  const link = document.createElement('a')
+  link.href = previewObjectUrl.value
+  link.download = props.selectedFile?.name?.replace(/\.docx$/i, '_公文格式.docx') || '公文格式.docx'
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
 }
+
+function setPreviewObjectUrl(url) {
+  if (previewObjectUrl.value?.startsWith('blob:')) URL.revokeObjectURL(previewObjectUrl.value)
+  previewObjectUrl.value = url
+}
+
+function clearPreview(clearError = true, invalidateRequest = true) {
+  if (invalidateRequest) renderRequestId += 1
+  resetPreviewFrame()
+  setPreviewObjectUrl('')
+  if (clearError) previewError.value = ''
+}
+
+function preparePreviewFrame() {
+  const frame = previewFrame.value
+  const doc = frame?.contentDocument
+  if (!doc) throw new Error('预览容器初始化失败')
+  doc.open()
+  doc.write(`<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <style>
+      html, body { margin: 0; min-height: 100%; background: #e9eef5; }
+      body {
+        font-family: "Times New Roman", "仿宋_GB2312", "FangSong_GB2312", "FangSong", "SimSun", serif;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: geometricPrecision;
+      }
+      .preview-root { min-height: 100%; padding: 18px; box-sizing: border-box; }
+      .docx-wrapper {
+        background: transparent !important;
+        padding: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        gap: 18px !important;
+      }
+      .docx {
+        margin: 0 !important;
+        box-shadow: 0 16px 38px rgba(31, 41, 55, 0.16) !important;
+      }
+      @media (max-width: 860px) {
+        .preview-root { padding: 10px; overflow-x: auto; }
+      }
+    </style>
+  </head>
+  <body><div id="docx-root" class="preview-root"></div></body>
+</html>`)
+  doc.close()
+  const root = doc.getElementById('docx-root')
+  if (!root) throw new Error('预览容器初始化失败')
+  return root
+}
+
+function resetPreviewFrame() {
+  const frame = previewFrame.value
+  if (!frame) return
+  frame.removeAttribute('src')
+  frame.style.height = '920px'
+  const doc = frame.contentDocument
+  if (doc?.body) doc.body.innerHTML = ''
+}
+
+function adjustPreviewFrameHeight() {
+  const frame = previewFrame.value
+  const body = frame?.contentDocument?.body
+  if (!frame || !body) return
+  frame.style.height = `${Math.max(body.scrollHeight, 920)}px`
+}
+
+onBeforeUnmount(() => clearPreview())
 </script>
 
 <style scoped>
@@ -181,55 +209,11 @@ function captureSelection() {
 .summary-item span { color: #7a8997; font-size: 12px; }
 .summary-item strong { color: #1a3a5c; font-size: 20px; line-height: 1; }
 .summary-roles { display: flex; flex-wrap: wrap; gap: 6px; }
+.summary-actions { display: flex; gap: 8px; margin-left: auto; flex-shrink: 0; }
 .summary-chip { padding: 2px 8px; border-radius: 999px; background: #edf2f7; color: #475569; font-size: 12px; line-height: 20px; }
 .preview-body { flex: 1; overflow-y: auto; background: #e9eef5; }
-.document-canvas { min-height: 100%; padding: 28px 18px 36px; overflow-x: auto; }
-.document-page {
-  width: min(794px, 100%); min-height: 1123px; margin: 0 auto; padding: 86px 96px;
-  background: #fff; color: #111827; border: 1px solid #d7dee8;
-  box-shadow: 0 16px 38px rgba(31, 41, 55, 0.16);
-  font-family: FangSong, 仿宋_GB2312, 仿宋, "Times New Roman", serif;
-}
-.doc-paragraph {
-  position: relative; margin: 0; color: #111; font-size: 21px; line-height: 1.75;
-  white-space: pre-wrap; word-break: break-word;
-}
-.doc-paragraph + .doc-paragraph { margin-top: 2px; }
-.result-page .doc-paragraph.role-title {
-  margin-bottom: 18px; text-align: center; font-family: "方正小标宋简体", SimSun, 宋体, serif;
-  font-size: 29px; font-weight: 400; line-height: 1.45;
-}
-.result-page .doc-paragraph.role-subtitle {
-  text-align: center; font-family: KaiTi, 楷体_GB2312, 楷体, serif; font-size: 21px;
-}
-.result-page .doc-paragraph.role-h1 {
-  font-family: SimHei, 黑体, sans-serif; font-size: 21px; font-weight: 400; text-indent: 0; text-align: justify;
-}
-.result-page .doc-paragraph.role-security {
-  font-family: SimHei, 黑体, sans-serif; font-size: 21px; text-align: left; text-indent: 0;
-}
-.result-page .doc-paragraph.role-h2 {
-  font-family: KaiTi, 楷体_GB2312, 楷体, serif; font-size: 21px; font-weight: 400; text-indent: 0; text-align: justify;
-}
-.result-page .doc-paragraph.role-h3,
-.result-page .doc-paragraph.role-h4 {
-  font-family: FangSong, 仿宋_GB2312, 仿宋, serif; font-size: 21px; text-indent: 0; text-align: justify;
-}
-.result-page .doc-paragraph.role-recipient { text-indent: 0; text-align: justify; }
-.result-page .doc-paragraph.role-body { text-indent: 2em; text-align: justify; }
-.result-page .doc-paragraph.role-attachment_head { text-indent: 2em; text-align: justify; }
-.result-page .doc-paragraph.role-attachment_other { text-indent: 5em; text-align: justify; }
-.result-page .doc-paragraph.role-sign_unit { text-align: right; text-indent: 0; }
-.result-page .doc-paragraph.role-sign_date { text-align: right; text-indent: 0; }
-.result-page .doc-paragraph.role-sign_contact { text-align: justify; text-indent: 2em; }
-.result-page .doc-paragraph[class*="role-"]::after {
-  content: attr(title); position: absolute; left: calc(100% + 14px); top: 8px;
-  max-width: 110px; padding: 3px 7px; border-radius: 6px; background: #f7fafc;
-  color: #718096; border: 1px solid #e2e8f0; font-family: "Microsoft YaHei", sans-serif;
-  font-size: 11px; line-height: 1.4; text-indent: 0; opacity: 0; pointer-events: none; transition: opacity 0.15s;
-}
-.result-page .doc-paragraph.role-body::after { display: none; }
-.doc-paragraph:hover::after { opacity: 1; }
+.docx-stage { min-height: 100%; padding: 18px; }
+.docx-frame { width: 100%; min-height: 920px; border: 0; display: block; background: #e9eef5; }
 .summary-chip.role-title { background: #fff0f0; color: #c53030; }
 .summary-chip.role-subtitle { background: #fdf0ff; color: #97266d; }
 .summary-chip.role-recipient { background: #eef7f0; color: #2f6b4f; }
@@ -247,10 +231,8 @@ function captureSelection() {
 
 @media (max-width: 860px) {
   .preview-summary { align-items: flex-start; flex-direction: column; }
-  .document-canvas { padding: 14px 10px 24px; }
-  .document-page { width: 100%; min-height: 780px; padding: 42px 34px; }
-  .doc-paragraph { font-size: 17px; line-height: 1.85; }
-  .result-page .doc-paragraph.role-title { font-size: 23px; }
-  .doc-paragraph::after { display: none; }
+  .summary-actions { margin-left: 0; width: 100%; }
+  .docx-stage { padding: 10px; overflow-x: auto; }
+  .docx-frame { min-width: 760px; }
 }
 </style>

@@ -421,6 +421,7 @@ async def generate_ai_document(
         "documents": result.get("documents", [result]),
         "files": synced_files,
         "warnings": result["warnings"],
+        "readReport": result.get("readReport"),
     }
 
 

@@ -1,5 +1,5 @@
 <template>
-  <div class="ai-assistant-shell" :style="assistantStyle">
+  <div ref="assistantShellRef" class="ai-assistant-shell" :class="{ open }" :style="assistantStyle">
     <button
       v-if="!open"
       class="assistant-launcher"
@@ -13,7 +13,7 @@
     <div v-else class="ai-container-wrapper">
       <div class="assistant-topbar">
         <div class="main-heading">公文写作助手</div>
-        <button class="assistant-close" type="button" title="收起" @click="open = false">收起</button>
+        <button class="assistant-close" type="button" title="收起" @click="collapseAssistant">收起</button>
       </div>
 
       <div class="ai-container" :class="{ expanded: messages.length || generating || result }">
@@ -43,6 +43,30 @@
                 <small>模板：{{ document.templateName || document.templateId || '自动判断' }}</small>
               </div>
               <button class="download-button" type="button" @click="handleDownload(document)">下载</button>
+            </div>
+            <div v-if="activeReadReport" class="read-report">
+              <div class="read-report-title">已读取内容范围</div>
+              <div class="read-stat-grid">
+                <span>正文 {{ activeReadReport.stats?.bodyParagraphs || 0 }} 段</span>
+                <span>表格 {{ activeReadReport.stats?.tables || 0 }} 个</span>
+                <span>单元格 {{ activeReadReport.stats?.tableCells || 0 }} 个</span>
+                <span>页眉 {{ activeReadReport.stats?.headers || 0 }} 段</span>
+                <span>页脚 {{ activeReadReport.stats?.footers || 0 }} 段</span>
+                <span>图片 {{ activeReadReport.stats?.images || 0 }} 张</span>
+                <span>字符 {{ activeReadReport.stats?.chars || 0 }}</span>
+                <span>分块 {{ activeReadReport.chunkCount || 0 }} 块</span>
+              </div>
+              <div v-if="activeReadReport.warnings?.length" class="read-warnings">
+                <div v-for="warning in activeReadReport.warnings" :key="warning">{{ warning }}</div>
+              </div>
+              <details v-if="activeReadReport.sampleItems?.length" class="read-samples">
+                <summary>查看读取样例</summary>
+                <div v-for="item in activeReadReport.sampleItems" :key="item.id" class="read-sample-item">
+                  <strong>{{ item.id }}</strong>
+                  <span>{{ sourceTypeLabel(item.sourceType) }} · {{ item.location }} · {{ item.charCount }} 字</span>
+                  <p>{{ item.text }}</p>
+                </div>
+              </details>
             </div>
             <pre class="result-preview">{{ result.preview }}</pre>
           </div>
@@ -162,7 +186,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   downloadAiDocument,
@@ -189,14 +213,19 @@ const showSettings = ref(false)
 const generating = ref(false)
 const result = ref(null)
 const messages = ref([])
+const assistantShellRef = ref(null)
 const templatePanelRef = ref(null)
 const templateUploadInput = ref(null)
 const selectedTemplate = computed(() => templates.value.find(item => item.id === templateId.value) || null)
+const activeReadReport = computed(() => {
+  const firstDocument = result.value?.documents?.[0]
+  return firstDocument?.readReport || result.value?.readReport || null
+})
 const launcherPosition = ref(null)
 const dragState = ref(null)
 const suppressLauncherClick = ref(false)
 const assistantStyle = computed(() => {
-  if (open.value || !launcherPosition.value) return {}
+  if (!launcherPosition.value) return {}
   return {
     left: `${launcherPosition.value.left}px`,
     top: `${launcherPosition.value.top}px`,
@@ -206,19 +235,38 @@ const assistantStyle = computed(() => {
 })
 
 onMounted(async () => {
+  document.addEventListener('pointerdown', handleDocumentPointerDown, true)
   await Promise.all([refreshTemplates(false), loadModelSettings()])
 })
 
 onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown, true)
   stopLauncherDrag()
 })
 
-function handleLauncherClick() {
+async function handleLauncherClick(event) {
   if (suppressLauncherClick.value) {
     suppressLauncherClick.value = false
     return
   }
+  const rect = event.currentTarget.getBoundingClientRect()
+  launcherPosition.value = {
+    left: rect.left,
+    top: rect.top,
+  }
   open.value = true
+  await nextTick()
+  keepAssistantInViewport()
+}
+
+function collapseAssistant() {
+  open.value = false
+}
+
+function handleDocumentPointerDown(event) {
+  if (!open.value) return
+  if (assistantShellRef.value?.contains(event.target)) return
+  collapseAssistant()
 }
 
 function startLauncherDrag(event) {
@@ -237,6 +285,7 @@ function startLauncherDrag(event) {
   event.currentTarget.setPointerCapture?.(event.pointerId)
   window.addEventListener('pointermove', moveLauncher)
   window.addEventListener('pointerup', stopLauncherDrag)
+  window.addEventListener('pointercancel', stopLauncherDrag)
 }
 
 function moveLauncher(event) {
@@ -257,6 +306,21 @@ function stopLauncherDrag() {
   dragState.value = null
   window.removeEventListener('pointermove', moveLauncher)
   window.removeEventListener('pointerup', stopLauncherDrag)
+  window.removeEventListener('pointercancel', stopLauncherDrag)
+}
+
+function keepAssistantInViewport() {
+  const shell = assistantShellRef.value
+  const position = launcherPosition.value
+  if (!shell || !position) return
+  const rect = shell.getBoundingClientRect()
+  const margin = 8
+  const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin)
+  const maxTop = Math.max(margin, window.innerHeight - rect.height - margin)
+  launcherPosition.value = {
+    left: Math.min(Math.max(margin, position.left), maxLeft),
+    top: Math.min(Math.max(margin, position.top), maxTop),
+  }
 }
 
 async function refreshTemplates(showMessage = true) {
@@ -325,6 +389,16 @@ function addCustomModel() {
   if (!modelOptions.value.includes(name)) modelOptions.value.push(name)
   modelName.value = name
   customModelName.value = ''
+}
+
+function sourceTypeLabel(type) {
+  return {
+    body: '正文',
+    table: '表格',
+    header: '页眉',
+    footer: '页脚',
+    text: '文本',
+  }[type] || type
 }
 
 async function saveModelSettings() {
@@ -566,6 +640,76 @@ async function handleDownload(generatedDoc = null) {
   background: #f8fafc;
   color: #334155;
   font-size: 13px;
+}
+
+.read-report {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.read-report-title {
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.read-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.read-stat-grid span {
+  overflow: hidden;
+  padding: 5px 7px;
+  border-radius: 8px;
+  background: #fff;
+  color: #475569;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.read-warnings {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  color: #b45309;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.read-samples {
+  margin-top: 8px;
+  color: #475569;
+  font-size: 11px;
+}
+
+.read-samples summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.read-sample-item {
+  margin-top: 6px;
+  padding: 7px;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.read-sample-item strong,
+.read-sample-item span {
+  display: block;
+}
+
+.read-sample-item p {
+  margin-top: 4px;
+  color: #334155;
+  line-height: 1.45;
 }
 
 .result-preview {
@@ -924,6 +1068,10 @@ async function handleDownload(generatedDoc = null) {
 
   .button-group {
     row-gap: 10px;
+  }
+
+  .read-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 </style>
