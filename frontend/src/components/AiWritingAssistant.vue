@@ -11,7 +11,7 @@
     </button>
 
     <div v-else class="ai-container-wrapper">
-      <div class="assistant-topbar">
+      <div ref="assistantTopbarRef" class="assistant-topbar" @pointerdown="startPanelDrag">
         <div class="main-heading">公文写作助手</div>
         <button class="assistant-close" type="button" title="收起" @click="collapseAssistant">收起</button>
       </div>
@@ -25,7 +25,17 @@
 
           <div v-if="generating" class="chat-message assistant">
             <div class="message-label">处理状态</div>
-            <div class="message-body">正在理解意图、匹配公文模板并生成正式文件...</div>
+            <div class="message-body">
+              {{ generateStatusText }}
+              <button class="cancel-generate" type="button" @click="cancelGenerate">取消</button>
+            </div>
+          </div>
+
+          <div v-if="result?.nodes" class="read-report">
+            <div class="read-report-title">流程节点</div>
+            <div class="read-stat-grid">
+              <span v-for="node in workflowNodes" :key="node.name">{{ node.name }}：{{ workflowStatusLabel(node.status) }}</span>
+            </div>
           </div>
 
           <div v-if="result" class="result-card">
@@ -33,7 +43,7 @@
               <div>
                 <div class="result-title">已生成文件</div>
                 <div class="result-subtitle">
-                  共 {{ result.documents?.length || 1 }} 份 · 模型：{{ modelName || '默认模型' }}
+                  共 {{ result.documents?.length || 1 }} 份（每份材料单独成文，不会自动汇总） · 模型：{{ modelName || '默认模型' }}
                 </div>
               </div>
             </div>
@@ -41,8 +51,24 @@
               <div>
                 <span>{{ document.filename }}</span>
                 <small>模板：{{ document.templateName || document.templateId || '自动判断' }}</small>
+                <small v-if="document.reference">
+                  体例样本：{{ document.reference.filename }} · 匹配 {{ formatSimilarity(document.reference.similarity) }}
+                </small>
+                <small v-if="document.generation?.validation">
+                  核验参考：原文片段重合 {{ formatSimilarity(document.generation.validation.sourceCopyCoverage) }} ·
+                  角色序列接近度 {{ formatSimilarity(document.generation.validation.structureCoverage) }} ·
+                  格式重试 {{ document.generation.rewriteRetries || 0 }} 次
+                </small>
               </div>
               <button class="download-button" type="button" @click="handleDownload(document)">下载</button>
+            </div>
+            <div v-if="result.failures?.length" class="read-warnings">
+              <div v-for="item in result.failures" :key="item.filename + item.reason">
+                失败：{{ item.filename }} — {{ item.reason }}
+              </div>
+            </div>
+            <div v-if="result.warnings?.length" class="read-warnings">
+              <div v-for="warning in result.warnings" :key="warning">{{ warning }}</div>
             </div>
             <div v-if="activeReadReport" class="read-report">
               <div class="read-report-title">已读取内容范围</div>
@@ -54,10 +80,15 @@
                 <span>页脚 {{ activeReadReport.stats?.footers || 0 }} 段</span>
                 <span>图片 {{ activeReadReport.stats?.images || 0 }} 张</span>
                 <span>字符 {{ activeReadReport.stats?.chars || 0 }}</span>
-                <span>分块 {{ activeReadReport.chunkCount || 0 }} 块</span>
+                <span>有效材料 {{ activeReadReport.materialQuality?.substantiveChars || 0 }} 字</span>
+                <span>处理 {{ processingModeLabel }}</span>
+                <span>成文 {{ draftedCharCount }} 字</span>
               </div>
               <div v-if="activeReadReport.warnings?.length" class="read-warnings">
                 <div v-for="warning in activeReadReport.warnings" :key="warning">{{ warning }}</div>
+              </div>
+              <div v-if="activeReadReport.materialQuality && activeReadReport.materialQuality.status !== 'ready'" class="read-warnings">
+                {{ activeReadReport.materialQuality?.reason || '材料正文不足' }}
               </div>
               <details v-if="activeReadReport.sampleItems?.length" class="read-samples">
                 <summary>查看读取样例</summary>
@@ -67,6 +98,9 @@
                   <p>{{ item.text }}</p>
                 </div>
               </details>
+            </div>
+            <div v-if="result?.stages" class="stage-meta">
+              提取 {{ result.stages.extractionSeconds || 0 }} 秒 · 成文 {{ result.stages.draftingSeconds || 0 }} 秒 · {{ result.stages.rendering }}
             </div>
             <pre class="result-preview">{{ result.preview }}</pre>
           </div>
@@ -81,8 +115,15 @@
         />
 
         <div v-if="files.length" class="selected-files">
-          <span v-for="file in files" :key="file.name + file.size" class="selected-file">
+          <span v-for="(file, index) in files" :key="file.name + file.size + index" class="selected-file">
             {{ file.name }}
+            <button type="button" class="remove-file" title="移除" @click="removeFile(index)">×</button>
+          </span>
+        </div>
+        <div v-if="templateFiles.length" class="selected-files">
+          <span v-for="(file, index) in templateFiles" :key="file.name + file.size + index" class="selected-file">
+            参考模板：{{ file.name }}
+            <button type="button" class="remove-file" title="移除" @click="removeTemplateFile(index)">×</button>
           </span>
         </div>
 
@@ -103,15 +144,15 @@
               ref="templateUploadInput"
               type="file"
               multiple
-              accept=".docx,.txt,.wps"
+              accept=".docx,.txt,.pdf,.png,.jpg,.jpeg,.bmp,.tiff,.wps,.ofd"
               hidden
               @change="handleTemplateFiles"
             />
           </div>
 
           <div class="option-group">
-            <label for="ai-file-input" class="ai-button voice" title="上传文件">
-              <input id="ai-file-input" type="file" multiple accept=".docx,.txt" @change="handleFiles" />
+            <label for="ai-file-input" class="ai-button voice" title="上传材料（DOCX/TXT/PDF/图片）">
+              <input id="ai-file-input" type="file" multiple accept=".docx,.txt,.pdf,.png,.jpg,.jpeg,.bmp,.tiff" @change="handleFiles" />
               <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" class="ai-icon">
                 <path d="M9.5 4C8.67157 4 8 4.67157 8 5.5V18.5C8 19.3284 8.67157 20 9.5 20C10.3284 20 11 19.3284 11 18.5V5.5C11 4.67157 10.3284 4 9.5 4Z" fill="currentColor" class="bar bar-1" />
                 <path d="M13 8.5C13 7.67157 13.6716 7 14.5 7C15.3284 7 16 7.67157 16 8.5V15.5C16 16.3284 15.3284 17 14.5 17C13.6716 17 13 16.3284 13 15.5V8.5Z" fill="currentColor" class="bar bar-2" />
@@ -140,10 +181,12 @@
 
         <div ref="templatePanelRef" class="config-panel template-panel">
           <label>公文模板</label>
+          <div v-if="templatesLoading" class="template-meta">正在加载模板...</div>
+          <button v-else-if="templatesError" type="button" class="template-retry" @click="refreshTemplates(true)">重新加载模板</button>
           <div class="template-radio-list">
             <label class="template-radio" :class="{ active: templateId === '' }">
               <input v-model="templateId" type="radio" value="" />
-              <span>自动判断</span>
+              <span>请选择目标文种</span>
             </label>
             <label
               v-for="template in templates"
@@ -153,25 +196,57 @@
             >
               <input v-model="templateId" type="radio" :value="template.id" />
               <span>{{ template.name }}</span>
-              <em>{{ template.label }} / {{ template.fileCount }}份</em>
+              <em>{{ template.label }} / 共 {{ template.fileCount }} 份 / 体例样本 {{ template.availableReferenceCount || 0 }} 份</em>
             </label>
           </div>
           <small v-if="selectedTemplate" class="template-meta">
-            已收录：{{ selectedTemplate.sampleFile || '无样例文件' }}
+            {{ selectedTemplate.corpusProfile?.summary || '模板语料尚未完成整理' }}
+            <span v-if="selectedTemplate.corpusProfile?.skippedFiles?.length">
+              未解析 {{ selectedTemplate.corpusProfile.skippedFiles.length }} 份
+            </span>
           </small>
+          <details
+            v-if="selectedTemplate?.corpusProfile?.skippedDetails?.length"
+            class="template-skipped"
+          >
+            <summary>查看未解析范文明细</summary>
+            <div
+              v-for="item in selectedTemplate.corpusProfile.skippedDetails"
+              :key="item.filename + item.reason"
+              class="template-skipped-item"
+            >
+              {{ item.filename }}：{{ item.reason }}
+            </div>
+          </details>
+        </div>
+
+        <div class="config-panel speed-panel">
+          <label>生成速度</label>
+          <div class="speed-options">
+            <label v-for="option in speedOptions" :key="option.value" :class="{ active: speedMode === option.value }">
+              <input v-model="speedMode" type="radio" :value="option.value" />
+              <span>{{ option.label }}</span>
+            </label>
+          </div>
+          <small class="template-meta">{{ selectedSpeed.description }}</small>
+          <label class="strict-toggle">
+            <input v-model="strictReferenceIsolation" type="checkbox" />
+            <span>严格范文隔离（检测到范文事实串入时阻断成文）</span>
+          </label>
         </div>
 
         <div v-if="showSettings" class="config-panel">
           <label>模型服务地址</label>
           <input v-model="requestUrl" class="ai-setting-input" placeholder="例如：https://api.deepseek.com 或内网 /v1 地址" />
           <label>API Key</label>
-          <input v-model="apiKey" class="ai-setting-input" type="password" placeholder="留空则使用后端 .env 配置" />
+          <input v-model="apiKey" class="ai-setting-input" type="password" placeholder="已配置则显示掩码；留空或保持掩码则不改动" />
           <label>模型选择</label>
           <div class="model-row">
             <select v-model="modelName" class="ai-select">
               <option v-for="model in modelOptions" :key="model" :value="model">{{ model }}</option>
             </select>
             <button type="button" class="save-config-button" @click="saveModelSettings">保存</button>
+            <button type="button" class="save-config-button secondary" @click="messages = []">清空对话</button>
           </div>
           <input
             v-model="customModelName"
@@ -190,9 +265,11 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   downloadAiDocument,
+  downloadFile,
   generateAiDocument,
   getAiModelConfig,
   getAiTemplates,
+  readBlobError,
   saveAiModelConfig,
   syncAiTemplates,
   uploadAiTemplates,
@@ -202,8 +279,20 @@ const emit = defineEmits(['generated'])
 const open = ref(false)
 const prompt = ref('')
 const files = ref([])
+const templateFiles = ref([])
 const templates = ref([])
 const templateId = ref('')
+const templatesLoading = ref(false)
+const templatesError = ref(false)
+const speedMode = ref('standard')
+const strictReferenceIsolation = ref(true)
+const MAX_AI_UPLOAD_BATCH = 20
+const speedOptions = [
+  { value: 'fast', label: '极速', description: '以较低成文预算快速完成材料成文。' },
+  { value: 'standard', label: '标准', description: '以标准成文预算依文种体例完成材料成文。' },
+  { value: 'deep', label: '长文', description: '以较高成文预算处理长材料与完整体例参照。' },
+]
+const selectedSpeed = computed(() => speedOptions.find(item => item.value === speedMode.value) || speedOptions[1])
 const requestUrl = ref('')
 const apiKey = ref('')
 const modelName = ref('')
@@ -211,19 +300,41 @@ const customModelName = ref('')
 const modelOptions = ref([])
 const showSettings = ref(false)
 const generating = ref(false)
+const generateStatusText = ref('正在匹配体例样本、按材料事实成文并排版...')
+const generateController = ref(null)
 const result = ref(null)
 const messages = ref([])
 const assistantShellRef = ref(null)
+const assistantTopbarRef = ref(null)
 const templatePanelRef = ref(null)
 const templateUploadInput = ref(null)
 const selectedTemplate = computed(() => templates.value.find(item => item.id === templateId.value) || null)
+const workflowNodes = computed(() => Object.values(result.value?.nodes || {}))
 const activeReadReport = computed(() => {
   const firstDocument = result.value?.documents?.[0]
   return firstDocument?.readReport || result.value?.readReport || null
 })
+const draftedCharCount = computed(() => {
+  const firstDocument = result.value?.documents?.[0] || {}
+  return (
+    result.value?.draftLength
+    || result.value?.summaryLength
+    || firstDocument.draftLength
+    || firstDocument.summaryLength
+    || 0
+  )
+})
+const processingModeLabel = computed(() => {
+  const mode = result.value?.processingMode || result.value?.documents?.[0]?.processingMode || ''
+  if (mode === 'direct_full_text') return '完整文本'
+  if (mode === 'ai_structured_brief') return '材料整理底稿'
+  if (mode === 'rule_fact_brief' || mode === 'rule_based_brief') return '事实清单'
+  return mode || '原生文本'
+})
 const launcherPosition = ref(null)
 const dragState = ref(null)
 const suppressLauncherClick = ref(false)
+let assistantResizeObserver = null
 const assistantStyle = computed(() => {
   if (!launcherPosition.value) return {}
   return {
@@ -236,12 +347,19 @@ const assistantStyle = computed(() => {
 
 onMounted(async () => {
   document.addEventListener('pointerdown', handleDocumentPointerDown, true)
+  window.addEventListener('resize', handleViewportResize)
+  if (typeof ResizeObserver !== 'undefined') {
+    assistantResizeObserver = new ResizeObserver(() => keepAssistantInViewport())
+    if (assistantShellRef.value) assistantResizeObserver.observe(assistantShellRef.value)
+  }
   await Promise.all([refreshTemplates(false), loadModelSettings()])
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', handleDocumentPointerDown, true)
-  stopLauncherDrag()
+  window.removeEventListener('resize', handleViewportResize)
+  assistantResizeObserver?.disconnect()
+  stopAssistantDrag()
 })
 
 async function handleLauncherClick(event) {
@@ -249,29 +367,54 @@ async function handleLauncherClick(event) {
     suppressLauncherClick.value = false
     return
   }
-  const rect = event.currentTarget.getBoundingClientRect()
-  launcherPosition.value = {
-    left: rect.left,
-    top: rect.top,
+  const launcherRect = event.currentTarget.getBoundingClientRect()
+  const anchor = {
+    x: launcherRect.left + launcherRect.width / 2,
+    y: launcherRect.top + launcherRect.height / 2,
   }
   open.value = true
+  await refreshTemplates(false)
   await nextTick()
-  keepAssistantInViewport()
+  alignPanelToAnchor(anchor)
 }
 
-function collapseAssistant() {
+async function collapseAssistant() {
+  const topbarRect = assistantTopbarRef.value?.getBoundingClientRect()
+  const anchor = topbarRect
+    ? { x: topbarRect.left + topbarRect.width / 2, y: topbarRect.top + topbarRect.height / 2 }
+    : null
   open.value = false
+  if (!anchor) return
+  await nextTick()
+  const launcherRect = assistantShellRef.value?.getBoundingClientRect()
+  if (!launcherRect) return
+  setAssistantPosition(
+    anchor.x - launcherRect.width / 2,
+    anchor.y - launcherRect.height / 2,
+    launcherRect.width,
+    launcherRect.height,
+  )
 }
 
 function handleDocumentPointerDown(event) {
-  if (!open.value) return
+  if (!open.value || generating.value) return
   if (assistantShellRef.value?.contains(event.target)) return
   collapseAssistant()
 }
 
 function startLauncherDrag(event) {
+  startAssistantDrag(event, true)
+}
+
+function startPanelDrag(event) {
+  if (event.target.closest('button, input, select, textarea, a')) return
+  startAssistantDrag(event, false)
+}
+
+function startAssistantDrag(event, suppressClick) {
   if (event.button !== 0) return
-  const rect = event.currentTarget.getBoundingClientRect()
+  const rect = assistantShellRef.value?.getBoundingClientRect()
+  if (!rect) return
   dragState.value = {
     pointerId: event.pointerId,
     startX: event.clientX,
@@ -281,32 +424,53 @@ function startLauncherDrag(event) {
     width: rect.width,
     height: rect.height,
     moved: false,
+    suppressClick,
   }
   event.currentTarget.setPointerCapture?.(event.pointerId)
-  window.addEventListener('pointermove', moveLauncher)
-  window.addEventListener('pointerup', stopLauncherDrag)
-  window.addEventListener('pointercancel', stopLauncherDrag)
+  window.addEventListener('pointermove', moveAssistant)
+  window.addEventListener('pointerup', stopAssistantDrag)
+  window.addEventListener('pointercancel', stopAssistantDrag)
 }
 
-function moveLauncher(event) {
+function moveAssistant(event) {
   const state = dragState.value
-  if (!state) return
+  if (!state || event.pointerId !== state.pointerId) return
   const dx = event.clientX - state.startX
   const dy = event.clientY - state.startY
   if (Math.abs(dx) + Math.abs(dy) > 4) state.moved = true
+  setAssistantPosition(state.left + dx, state.top + dy, state.width, state.height)
+}
+
+function stopAssistantDrag() {
+  const state = dragState.value
+  if (state?.moved && state.suppressClick) suppressLauncherClick.value = true
+  dragState.value = null
+  window.removeEventListener('pointermove', moveAssistant)
+  window.removeEventListener('pointerup', stopAssistantDrag)
+  window.removeEventListener('pointercancel', stopAssistantDrag)
+}
+
+function setAssistantPosition(left, top, width, height) {
   const margin = 8
+  const maxLeft = Math.max(margin, window.innerWidth - width - margin)
+  const maxTop = Math.max(margin, window.innerHeight - height - margin)
   launcherPosition.value = {
-    left: Math.min(Math.max(margin, state.left + dx), window.innerWidth - state.width - margin),
-    top: Math.min(Math.max(margin, state.top + dy), window.innerHeight - state.height - margin),
+    left: Math.min(Math.max(margin, left), maxLeft),
+    top: Math.min(Math.max(margin, top), maxTop),
   }
 }
 
-function stopLauncherDrag() {
-  if (dragState.value?.moved) suppressLauncherClick.value = true
-  dragState.value = null
-  window.removeEventListener('pointermove', moveLauncher)
-  window.removeEventListener('pointerup', stopLauncherDrag)
-  window.removeEventListener('pointercancel', stopLauncherDrag)
+function alignPanelToAnchor(anchor) {
+  const shellRect = assistantShellRef.value?.getBoundingClientRect()
+  const topbarRect = assistantTopbarRef.value?.getBoundingClientRect()
+  if (!shellRect || !topbarRect) return
+  const topbarOffset = topbarRect.top - shellRect.top
+  setAssistantPosition(
+    anchor.x - shellRect.width / 2,
+    anchor.y - topbarOffset - topbarRect.height / 2,
+    shellRect.width,
+    shellRect.height,
+  )
 }
 
 function keepAssistantInViewport() {
@@ -314,22 +478,25 @@ function keepAssistantInViewport() {
   const position = launcherPosition.value
   if (!shell || !position) return
   const rect = shell.getBoundingClientRect()
-  const margin = 8
-  const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin)
-  const maxTop = Math.max(margin, window.innerHeight - rect.height - margin)
-  launcherPosition.value = {
-    left: Math.min(Math.max(margin, position.left), maxLeft),
-    top: Math.min(Math.max(margin, position.top), maxTop),
-  }
+  setAssistantPosition(position.left, position.top, rect.width, rect.height)
+}
+
+function handleViewportResize() {
+  keepAssistantInViewport()
 }
 
 async function refreshTemplates(showMessage = true) {
+  templatesLoading.value = true
+  templatesError.value = false
   try {
     const res = showMessage ? await syncAiTemplates() : await getAiTemplates()
     templates.value = res.data.templates || []
     if (showMessage) ElMessage.success(`已收录 ${templates.value.length} 类模板`)
   } catch (err) {
+    templatesError.value = true
     ElMessage.warning('模板索引读取失败：' + (err.response?.data?.detail || err.message))
+  } finally {
+    templatesLoading.value = false
   }
 }
 
@@ -338,11 +505,6 @@ function focusTemplateSelect() {
 }
 
 function triggerTemplateUpload() {
-  if (!templateId.value) {
-    ElMessage.warning('请先选择要接入的公文模板类别')
-    focusTemplateSelect()
-    return
-  }
   templateUploadInput.value?.click()
 }
 
@@ -350,19 +512,12 @@ async function handleTemplateFiles(event) {
   const selectedFiles = Array.from(event.target.files || [])
   event.target.value = ''
   if (!selectedFiles.length) return
-  if (!templateId.value) {
-    ElMessage.warning('请先选择要接入的公文模板类别')
-    return
-  }
   try {
-    const res = await uploadAiTemplates({
-      files: selectedFiles,
-      templateId: templateId.value,
-    })
+    const res = await uploadAiTemplates({ files: selectedFiles, templateId: templateId.value })
     templates.value = res.data.templates || templates.value
-    ElMessage.success(`已上传并收录 ${res.data.count || 0} 个模板文件`)
+    ElMessage.success(`模板已入库并完成预解析，共收录 ${res.data.count || 0} 个文件`)
   } catch (err) {
-    ElMessage.error('模板上传失败：' + (err.response?.data?.detail || err.message))
+    ElMessage.error('模板入库失败：' + (err.response?.data?.detail || err.message))
   }
 }
 
@@ -370,7 +525,7 @@ async function loadModelSettings() {
   try {
     const res = await getAiModelConfig()
     requestUrl.value = res.data.requestUrl || ''
-    apiKey.value = res.data.apiKey || ''
+    apiKey.value = res.data.apiKeyConfigured ? (res.data.apiKey || '********') : ''
     modelName.value = res.data.modelName || ''
     modelOptions.value = res.data.models || []
   } catch (err) {
@@ -379,8 +534,48 @@ async function loadModelSettings() {
 }
 
 function handleFiles(event) {
-  files.value = Array.from(event.target.files || [])
+  const selected = Array.from(event.target.files || [])
   event.target.value = ''
+  if (selected.length > MAX_AI_UPLOAD_BATCH) {
+    ElMessage.warning(`单次最多选择 ${MAX_AI_UPLOAD_BATCH} 个材料，已忽略超出部分`)
+  }
+  const next = [...files.value]
+  for (const file of selected.slice(0, MAX_AI_UPLOAD_BATCH)) {
+    const suffix = `.${file.name.split('.').pop()?.toLowerCase() || ''}`
+    if (!['.docx', '.txt', '.pdf', '.png', '.jpg', '.jpeg', '.bmp', '.tiff'].includes(suffix)) {
+      ElMessage.warning(`${file.name} 格式不支持，请上传 DOCX、TXT、PDF 或图片`)
+      continue
+    }
+    if (file.size > 30 * 1024 * 1024) {
+      ElMessage.warning(`${file.name} 超过 30MB`)
+      continue
+    }
+    if (!next.some(item => item.name === file.name && item.size === file.size && item.lastModified === file.lastModified)) {
+      next.push(file)
+    }
+  }
+  files.value = next
+}
+
+function removeFile(index) {
+  files.value = files.value.filter((_, i) => i !== index)
+}
+
+function removeTemplateFile(index) {
+  templateFiles.value = templateFiles.value.filter((_, i) => i !== index)
+}
+
+function workflowStatusLabel(status) {
+  return { completed: '完成', running: '处理中', failed: '失败', blocked: '已阻断' }[status] || status
+}
+
+function cancelGenerate() {
+  generateController.value?.abort()
+  generateController.value = null
+  generating.value = false
+  generateStatusText.value = '正在匹配体例样本、按材料事实成文并排版...'
+  messages.value.push({ id: Date.now() + 3, role: 'assistant', text: '已取消本次生成' })
+  ElMessage.info('已取消生成')
 }
 
 function addCustomModel() {
@@ -401,6 +596,11 @@ function sourceTypeLabel(type) {
   }[type] || type
 }
 
+function formatSimilarity(value) {
+  const score = Number(value)
+  return Number.isFinite(score) ? `${(score * 100).toFixed(1)}%` : '未知'
+}
+
 async function saveModelSettings() {
   try {
     const res = await saveAiModelConfig({
@@ -418,14 +618,28 @@ async function saveModelSettings() {
 }
 
 async function handleGenerate() {
+  if (files.value.length === 0) {
+    ElMessage.warning('请先上传材料后再生成，避免无依据空写')
+    return
+  }
   if (!prompt.value.trim() && files.value.length === 0) {
     ElMessage.warning('请上传文件或填写写作要求')
+    return
+  }
+  if (!templateId.value) {
+    ElMessage.warning('请选择目标公文模板')
+    focusTemplateSelect()
+    return
+  }
+  if (!selectedTemplate.value?.availableReferenceCount) {
+    ElMessage.warning('该文种没有可解析范文，请先将范文转换为 DOCX 或 PDF 并重新同步')
+    focusTemplateSelect()
     return
   }
 
   const userText = [
     prompt.value.trim() || '根据上传文件生成正式公文',
-    files.value.length ? `已上传 ${files.value.length} 个文件` : '',
+    files.value.length ? `已上传 ${files.value.length} 个文件（将分别生成 ${files.value.length} 份公文）` : '',
   ].filter(Boolean).join('\n')
 
   messages.value = [
@@ -434,40 +648,67 @@ async function handleGenerate() {
   ]
   generating.value = true
   result.value = null
+  generateStatusText.value = files.value.length > 1
+    ? `正在逐份处理 ${files.value.length} 份材料（每份单独成文）...`
+    : '正在匹配体例样本、按材料事实成文并排版...'
+  const controller = new AbortController()
+  generateController.value = controller
 
   try {
     const res = await generateAiDocument({
-      files: files.value,
+      materialFiles: files.value,
       prompt: prompt.value,
       requestUrl: requestUrl.value,
       apiKey: apiKey.value,
       modelName: modelName.value,
       templateId: templateId.value,
+      speedMode: speedMode.value,
+      strictReferenceIsolation: strictReferenceIsolation.value,
+      signal: controller.signal,
     })
     result.value = res.data
     emit('generated', res.data)
+    const failCount = res.data.failures?.length || 0
     messages.value.push({
       id: Date.now() + 1,
       role: 'assistant',
-      text: `已完成模板匹配和文件生成：${res.data.filename}`,
+      text: `已按材料完成成文：成功 ${res.data.documents?.length || 1} 份${failCount ? `，失败 ${failCount} 份` : ''}${res.data.timings?.totalSeconds ? `（${res.data.timings.totalSeconds} 秒）` : ''}`,
     })
-    if (res.data.warnings?.length) ElMessage.warning(res.data.warnings[0])
-    else ElMessage.success('公文文件已生成')
+    if (res.data.warnings?.length) {
+      ElMessage.warning({
+        message: res.data.warnings.slice(0, 5).join('\n'),
+        duration: 8000,
+        dangerouslyUseHTMLString: false,
+      })
+    } else if (failCount) {
+      ElMessage.warning(`部分成功：${res.data.documents?.length || 0} 份，失败 ${failCount} 份`)
+    } else {
+      ElMessage.success('公文文件已生成')
+    }
   } catch (err) {
+    if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError' || controller.signal.aborted) {
+      return
+    }
     const detail = err.response?.data?.detail || err.message
     messages.value.push({ id: Date.now() + 2, role: 'assistant', text: `生成失败：${detail}` })
     ElMessage.error('生成失败：' + detail)
   } finally {
     generating.value = false
+    generateController.value = null
+    generateStatusText.value = '正在匹配体例样本、按材料事实成文并排版...'
   }
 }
 
 async function handleDownload(generatedDoc = null) {
   const target = generatedDoc || result.value
-  if (!target?.documentId) return
+  if (!target) return
   try {
-    const res = await downloadAiDocument(target.documentId)
-    const url = window.URL.createObjectURL(new Blob([res.data]))
+    const res = target.fileId
+      ? await downloadFile(target.fileId)
+      : await downloadAiDocument(target.documentId)
+    const url = window.URL.createObjectURL(new Blob([res.data], {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }))
     const link = document.createElement('a')
     link.href = url
     link.download = target.filename || 'AI公文.docx'
@@ -476,7 +717,7 @@ async function handleDownload(generatedDoc = null) {
     document.body.removeChild(link)
     window.URL.revokeObjectURL(url)
   } catch (err) {
-    ElMessage.error('下载失败：' + (err.response?.data?.detail || err.message))
+    ElMessage.error(await readBlobError(err, '下载失败，文件可能已过期，请重新生成'))
   }
 }
 </script>
@@ -521,6 +762,13 @@ async function handleDownload(generatedDoc = null) {
   grid-template-columns: 1fr auto;
   align-items: center;
   padding: 0 4px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.assistant-topbar:active {
+  cursor: grabbing;
 }
 
 .main-heading {
@@ -731,6 +979,10 @@ async function handleDownload(generatedDoc = null) {
   cursor: pointer;
 }
 
+.save-config-button.secondary {
+  background: #64748b;
+}
+
 .ai-input {
   width: 100%;
   min-height: 44px;
@@ -751,6 +1003,9 @@ async function handleDownload(generatedDoc = null) {
 
 .selected-file {
   max-width: 220px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -759,6 +1014,28 @@ async function handleDownload(generatedDoc = null) {
   background: #e9ecef;
   color: #475569;
   font-size: 12px;
+}
+
+.remove-file {
+  border: none;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+}
+
+.cancel-generate {
+  display: inline-block;
+  margin-left: 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
 }
 
 .button-group,
@@ -1037,10 +1314,42 @@ async function handleDownload(generatedDoc = null) {
   white-space: nowrap;
 }
 
+.template-skipped {
+  margin-top: 6px;
+  color: #b45309;
+  font-size: 11px;
+}
+
+.template-skipped summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.template-skipped-item {
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.speed-options { display: flex; gap: 8px; margin-top: 8px; }
+.speed-options label, .template-retry { border: 1px solid #d8e5f2; border-radius: 6px; background: #fff; padding: 6px 9px; color: #475569; font-size: 12px; cursor: pointer; }
+.speed-options label.active { border-color: #1677ff; color: #1677ff; background: #f0f7ff; }
+.speed-options input { margin-right: 4px; }
+.strict-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+}
+
 .model-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   gap: 8px;
+  align-items: center;
 }
 
 .ai-select,
@@ -1055,7 +1364,6 @@ async function handleDownload(generatedDoc = null) {
 @media (max-width: 640px) {
   .ai-assistant-shell {
     right: 15px;
-    left: 15px;
   }
 
   .ai-container-wrapper {

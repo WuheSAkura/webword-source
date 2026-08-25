@@ -37,10 +37,17 @@ blank_lines:
 inline_hierarchy:
   prefer_source_style_boundary: true
   terminators: "。！？；：.!?;:"
+  max_heading_chars: { h1: 18, h2: 16, h3: 14, h4: 12 }
   body_markers: ["一是", "二是", "三是", "四是", "五是", "六是", "七是", "八是", "九是", "十是"]
   body_marker_bold: true
 
-# 各区块样式。align 取值：left/center/right/justify/center_to_date/right_indent_4chars
+preserve_inline:
+  # 套格式时统一字体字号，但保留正文中的重点标记，避免原文局部加粗/下划线/高亮丢失。
+  enabled: true
+  roles: [body, recipient, attachment_head, attachment_other, sign_contact]
+  properties: [bold, italic, underline, color, highlight]
+
+# 各区块样式。align 取值：left/center/right/justify/center_to_date/right_indent_2chars/right_indent_4chars
 # first_line_chars 单位为字符（2 字符 = 缩进两个汉字宽）
 styles:
   title:      { cn: "方正小标宋简体", size_pt: 22, bold: false, align: center,  first_line_chars: 0, line_pt: 32 }

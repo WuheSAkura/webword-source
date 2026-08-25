@@ -10,7 +10,7 @@
       @drop.prevent="onDrop"
     >
       <el-icon :size="32"><UploadFilled /></el-icon>
-      <p>点击或拖拽上传 .docx</p>
+      <p>点击或拖拽上传 .docx（单文件≤20MB，单次≤20个）</p>
       <input ref="fileInput" type="file" accept=".docx" multiple hidden @change="onSelect" />
     </div>
 

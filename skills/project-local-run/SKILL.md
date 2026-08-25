@@ -1,6 +1,6 @@
 ---
 name: project-local-run
-description: Start, restart, and diagnose this gongwen local development project, including the FastAPI backend on port 8001 and Vite/Vue frontend on port 3000. Use when the user asks to start or restart the local frontend/backend, fix localhost access failures, inspect port conflicts, read run logs, or record recurring errors and solutions for this project.
+description: Start, restart, and diagnose this gongwen local development project, including the FastAPI backend on port 8010 and Vite/Vue frontend on port 3000. Use when the user asks to start or restart the local frontend/backend, fix localhost access failures, inspect port conflicts, read run logs, or record recurring errors and solutions for this project.
 ---
 
 # Project Local Run
@@ -38,19 +38,19 @@ powershell -ExecutionPolicy Bypass -File .\skills\project-local-run\scripts\rest
 
 This script:
 
-- Stops processes listening on ports `8001` and `3000`.
+- Stops processes listening on ports `8010` and `3000`.
 - Ensures frontend dependencies exist.
-- Starts backend with `python -m uvicorn app:app --host 0.0.0.0 --port 8001`.
+- Starts backend with `python -m uvicorn app:app --host 0.0.0.0 --port 8010 --reload --reload-dir backend`.
 - Starts frontend with `frontend\node_modules\.bin\vite.cmd --host 0.0.0.0 --port 3000 --strictPort`.
 - Writes logs to `.codex-runlogs\backend.out.log`, `.codex-runlogs\backend.err.log`, `.codex-runlogs\frontend.out.log`, and `.codex-runlogs\frontend.err.log`.
-- Checks `http://localhost:8001/api/health` and `http://localhost:3000`.
+- Checks `http://localhost:8010/api/health` and `http://localhost:3000`.
 
 ## Workflow
 
 1. Inspect current listeners before restart:
 
 ```powershell
-Get-NetTCPConnection -LocalPort 8001,3000 -ErrorAction SilentlyContinue |
+Get-NetTCPConnection -LocalPort 8010,3000 -ErrorAction SilentlyContinue |
   Select-Object LocalPort,State,OwningProcess
 ```
 
@@ -102,11 +102,11 @@ The template API must return exactly 15 entries ordered from `1决议` through `
 ## Project Details
 
 - Backend working directory: `backend`
-- Backend port: `8001`
+- Backend port: `8010` (non-Docker local)
 - Backend health check: `GET /api/health`
 - Frontend working directory: `frontend`
 - Frontend port: `3000`
-- Vite proxy target for `/api`: `http://localhost:8001`
+- Vite proxy target for `/api`: `http://127.0.0.1:8010`
 - Frontend dependency command: `npm install`
 - Frontend build check: `npm run build`
 - Docker compose file: `docker-compose.yml`
@@ -120,5 +120,5 @@ The template API must return exactly 15 entries ordered from `1决议` through `
 - Do not use `git reset --hard` or revert user edits while diagnosing startup problems.
 - Prefer direct Vite executable startup on Windows because `npm run dev` may hang without exposing useful output in some shells.
 - Keep new troubleshooting knowledge in `references\known-issues.md`.
-- Treat Docker port `8000` and non-Docker backend port `8001` as separate deployment modes.
+- Treat Docker port `8000` and non-Docker backend port `8010` as separate deployment modes. Do not reuse `8001` locally; other stacks (e.g. `xianyu_backend`) commonly bind `127.0.0.1:8001`.
 - For Docker success, do not stop at container "Up"; verify `/api/health`, homepage, template count, and recent logs.

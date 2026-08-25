@@ -9,6 +9,12 @@ services:
       - "8000:8000"
     volumes:
       - webword-temp:/app/backend/temp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,json; r=urllib.request.urlopen('http://127.0.0.1:8000/api/ai/templates', timeout=8); d=json.load(r); assert len(d.get('templates') or []) >= 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 volumes:
   webword-temp:

@@ -14,9 +14,13 @@ templates:
     reference: gongwen_config.yaml
     classification:
       title_keywords: []
+      title_max_index: 20
+      recipient_max_index: 8
+      recipient_after_title_window: 6
       recipient: optional
       subtitle: optional
       signature: optional
+      signature_unit_max_len: 36
     format: {}
 
   resolution:
@@ -26,9 +30,12 @@ templates:
     reference: XX省公安厅党委会议决议.docx
     classification:
       title_keywords: [决议]
+      title_max_index: 12
+      title_leading_lines: 2
       recipient: forbidden
       subtitle: optional
       signature: required
+      signature_unit_max_len: 36
     format:
       page:
         margin_cm: { top: 2.54, bottom: 2.54, left: 3.17, right: 3.17 }
@@ -45,9 +52,12 @@ templates:
     reference: 广西壮族自治区公安厅关于给厅机关2024年度公务员考核优秀等次民警记功嘉奖的决定.wps
     classification:
       title_keywords: [决定]
+      title_max_index: 12
+      title_leading_lines: 2
       recipient: forbidden
       subtitle: optional
       signature: required
+      signature_unit_max_len: 36
     format:
       page:
         margin_cm: { top: 3.70, bottom: 2.54, left: 2.38, right: 2.80 }
@@ -65,9 +75,12 @@ templates:
     reference: 广西壮族自治区公安厅关于授予和晋升赖志庸等同志人民警察警司警衔的命令.docx
     classification:
       title_keywords: [命令, 令]
+      title_max_index: 10
+      title_leading_lines: 1
       recipient: forbidden
       subtitle: optional
       signature: optional
+      signature_unit_max_len: 36
     format:
       page:
         margin_cm: { top: 2.54, bottom: 2.54, left: 2.70, right: 2.70 }
@@ -92,9 +105,12 @@ templates:
     reference: XX省公安厅环食药侦专项工作公报.docx
     classification:
       title_keywords: [公报]
+      title_max_index: 12
+      title_leading_lines: 2
       recipient: forbidden
       subtitle: optional
       signature: required
+      signature_unit_max_len: 36
     format:
       page:
         margin_cm: { top: 2.54, bottom: 2.54, left: 3.17, right: 3.17 }
@@ -111,9 +127,12 @@ templates:
     reference: 广西壮族自治区公安厅关于委托下放保安服务公司设立及法定代表人变更审批权限的公告.docx
     classification:
       title_keywords: [公告]
+      title_max_index: 12
+      title_leading_lines: 2
       recipient: forbidden
       subtitle: optional
       signature: required
+      signature_unit_max_len: 36
     format:
       page:
         margin_cm: { top: 2.54, bottom: 2.54, left: 3.17, right: 3.17 }
@@ -138,9 +157,12 @@ templates:
     reference: XX省公安厅通告.docx
     classification:
       title_keywords: [通告]
+      title_max_index: 12
+      title_leading_lines: 2
       recipient: forbidden
       subtitle: optional
       signature: required
+      signature_unit_max_len: 36
       closing_phrases: [特此通告]
     format:
       page:
@@ -160,9 +182,12 @@ templates:
     reference: 广西生态警务机制建设实施意见-20260624稿2(1).docx
     classification:
       title_keywords: [意见]
+      title_max_index: 14
+      title_leading_lines: 2
       recipient: forbidden
       subtitle: optional
       signature: optional
+      signature_unit_max_len: 36
     format:
       page:
         margin_cm: { top: 2.54, bottom: 2.54, left: 3.17, right: 3.17 }
@@ -180,9 +205,14 @@ templates:
     reference: 广西壮族自治区公安厅办公室关于厅领导赴梧州市开展调研的通知.docx
     classification:
       title_keywords: [通知]
+      title_max_index: 14
+      title_leading_lines: 2
+      recipient_max_index: 12
+      recipient_after_title_window: 6
       recipient: required
       subtitle: optional
       signature: required
+      signature_unit_max_len: 36
     format:
       page:
         margin_cm: { top: 2.54, bottom: 2.54, left: 3.17, right: 3.17 }
@@ -200,9 +230,14 @@ templates:
     reference: 广西壮族自治区公安厅办公室关于近期全区涉警道路交通事故情况的通报.wps
     classification:
       title_keywords: [通报]
+      title_max_index: 14
+      title_leading_lines: 2
+      recipient_max_index: 12
+      recipient_after_title_window: 6
       recipient: required
       subtitle: optional
       signature: required
+      signature_unit_max_len: 36
     format:
       page:
         margin_cm: { top: 3.70, bottom: 3.50, left: 2.80, right: 2.60 }
@@ -221,9 +256,14 @@ templates:
     reference: 广西壮族自治区公安厅知识产权犯罪侦查总队关于非标电缆案件侦办进展情况的报告.docx
     classification:
       title_keywords: [报告]
+      title_max_index: 14
+      title_leading_lines: 2
+      recipient_max_index: 12
+      recipient_after_title_window: 6
       recipient: required
       subtitle: optional
       signature: required
+      signature_unit_max_len: 36
       closing_phrases: [特此报告]
     format:
       page:
@@ -243,9 +283,14 @@ templates:
     reference: 关于挂牌督办“5.26”侵犯著作权案的请示.docx
     classification:
       title_keywords: [请示]
+      title_max_index: 14
+      title_leading_lines: 2
+      recipient_max_index: 12
+      recipient_after_title_window: 6
       recipient: required
       subtitle: optional
       signature: required
+      signature_unit_max_len: 36
     format:
       page:
         margin_cm: { top: 3.70, bottom: 3.50, left: 2.80, right: 2.60 }
@@ -263,9 +308,14 @@ templates:
     reference: 广西壮族自治区公安厅关于同意开展2024年各类缴获毒品销毁的批复.docx
     classification:
       title_keywords: [批复]
+      title_max_index: 14
+      title_leading_lines: 2
+      recipient_max_index: 12
+      recipient_after_title_window: 6
       recipient: required
       subtitle: optional
       signature: required
+      signature_unit_max_len: 36
       closing_phrases: [此复]
     format:
       page:
@@ -290,9 +340,14 @@ templates:
     reference: 关于赴江苏省公安厅环食药侦总队考察学习的函.docx
     classification:
       title_keywords: [函]
+      title_max_index: 14
+      title_leading_lines: 2
+      recipient_max_index: 12
+      recipient_after_title_window: 6
       recipient: required
       subtitle: optional
       signature: required
+      signature_unit_max_len: 36
       closing_phrases: [此函, 望予支持为盼]
     format:
       page:
@@ -314,9 +369,12 @@ templates:
     reference: 关于进一步强化全区环食药犯罪侦查工作的议案.docx
     classification:
       title_keywords: [议案]
+      title_max_index: 12
+      title_leading_lines: 2
       recipient: forbidden
       subtitle: optional
       signature: required
+      signature_unit_max_len: 36
     format:
       page:
         margin_cm: { top: 2.54, bottom: 2.54, left: 3.17, right: 3.17 }
@@ -334,10 +392,12 @@ templates:
     reference: 广西壮族自治区公安厅第三十一次周例会会议纪要.wps
     classification:
       title_keywords: [纪要]
+      title_max_index: 8
       title_leading_lines: 0
       recipient: forbidden
       subtitle: optional
       signature: optional
+      signature_unit_max_len: 36
     format:
       page:
         margin_cm: { top: 3.70, bottom: 3.50, left: 2.80, right: 2.60 }

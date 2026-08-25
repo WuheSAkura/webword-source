@@ -1,5 +1,5 @@
 param(
-  [int]$BackendPort = 8001,
+  [int]$BackendPort = 8010,
   [int]$FrontendPort = 3000
 )
 
@@ -57,7 +57,12 @@ if (-not (Test-Path (Join-Path $FrontendDir "node_modules"))) {
   }
 }
 
-$backendArgs = @("-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "$BackendPort")
+$backendArgs = @(
+  "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "$BackendPort",
+  "--reload", "--reload-dir", $BackendDir,
+  "--reload-exclude=temp/*",
+  "--reload-exclude=template_library.db"
+)
 Start-Process -FilePath "python" -ArgumentList $backendArgs -WorkingDirectory $BackendDir -RedirectStandardOutput $BackendLog -RedirectStandardError $BackendErrLog -WindowStyle Hidden
 
 $viteCmd = Join-Path $FrontendDir "node_modules\.bin\vite.cmd"
@@ -68,12 +73,27 @@ Start-Sleep -Seconds 5
 
 $backendStatus = Test-Http "http://localhost:$BackendPort/api/health"
 $frontendStatus = Test-Http "http://localhost:$FrontendPort"
+$templateCount = $null
+$templateWarning = $null
+try {
+  $templatePayload = Invoke-RestMethod "http://127.0.0.1:$BackendPort/api/ai/templates" -TimeoutSec 10
+  $templateCount = @($templatePayload.templates).Count
+  if ($templateCount -lt 1) {
+    $templateWarning = "AI 模板库为空，请确认范文目录存在并访问 /api/ai/templates/sync"
+  } elseif ($templateCount -ne 15) {
+    $templateWarning = "AI 模板库条目数为 $templateCount，期望 15；请检查 template_library.db 是否来自 Windows 路径"
+  }
+} catch {
+  $templateWarning = "无法读取 AI 模板库：$($_.Exception.Message)"
+}
 
 [PSCustomObject]@{
   BackendUrl = "http://localhost:$BackendPort"
   BackendHealth = $backendStatus
   FrontendUrl = "http://localhost:$FrontendPort"
   FrontendStatus = $frontendStatus
+  AiTemplateCount = $templateCount
+  AiTemplateWarning = $templateWarning
   BackendLog = $BackendLog
   BackendErrLog = $BackendErrLog
   FrontendLog = $FrontendLog

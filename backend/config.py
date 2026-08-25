@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
     "inline_hierarchy": {
         "prefer_source_style_boundary": True,
         "terminators": "。！？；：.!?;:",
+        "max_heading_chars": {"h1": 18, "h2": 16, "h3": 14, "h4": 12},
         "body_markers": ["一是", "二是", "三是", "四是", "五是", "六是", "七是", "八是", "九是", "十是"],
         "body_marker_bold": True,
     },

@@ -1,6 +1,45 @@
 import axios from 'axios'
 
-const api = axios.create({ baseURL: '/api', timeout: 120000 })
+const api = axios.create({ baseURL: '/api', timeout: 180000 })
+
+/** 将 blob 错误响应解析为可读文案（避免把 JSON 错误体当 docx 下载） */
+export async function readBlobError(error, fallback = '请求失败') {
+  const data = error?.response?.data
+  if (data instanceof Blob) {
+    try {
+      const text = await data.text()
+      const parsed = JSON.parse(text)
+      if (parsed?.detail) {
+        return typeof parsed.detail === 'string' ? parsed.detail : JSON.stringify(parsed.detail)
+      }
+      if (parsed?.message) return parsed.message
+      return text || fallback
+    } catch {
+      return fallback
+    }
+  }
+  if (typeof data?.detail === 'string') return data.detail
+  return error?.message || fallback
+}
+
+function ensureBlobOk(response, fallback) {
+  const type = String(response.headers?.['content-type'] || '')
+  if (type.includes('application/json')) {
+    return response.data.text().then((text) => {
+      let detail = fallback
+      try {
+        const parsed = JSON.parse(text)
+        detail = parsed?.detail || parsed?.message || text || fallback
+      } catch {
+        detail = text || fallback
+      }
+      const err = new Error(detail)
+      err.response = { status: response.status, data: { detail } }
+      throw err
+    })
+  }
+  return response
+}
 
 /** 批量上传文件 */
 export function uploadFiles(files) {
@@ -37,8 +76,11 @@ export function previewResult(fileId) {
 }
 
 /** 下载处理后的文件 */
-export function downloadFile(fileId) {
-  return api.get(`/download/${fileId}`, { responseType: 'blob' })
+export function downloadFile(fileId, options = {}) {
+  return api.get(`/download/${fileId}`, {
+    responseType: 'blob',
+    onDownloadProgress: options.onProgress,
+  }).then((res) => ensureBlobOk(res, '下载失败，文件可能已过期，请重新处理或重新生成'))
 }
 
 /** 对处理后文档应用局部修改 */
@@ -51,6 +93,11 @@ export function undoFile(fileId) {
   return api.post(`/undo/${fileId}`)
 }
 
+/** 删除单个文件 */
+export function deleteFile(fileId) {
+  return api.delete(`/files/${fileId}`)
+}
+
 /** 清空所有文件 */
 export function clearAll() {
   return api.delete('/files')
@@ -58,12 +105,12 @@ export function clearAll() {
 
 /** AI 公文写作：读取已收录模板索引 */
 export function getAiTemplates() {
-  return api.get('/ai/templates')
+  return api.get('/ai/templates', { timeout: 30000 })
 }
 
 /** AI 公文写作：重新收录模板目录到本地数据库 */
 export function syncAiTemplates() {
-  return api.post('/ai/templates/sync')
+  return api.post('/ai/templates/sync', null, { timeout: 300000 })
 }
 
 /** AI 公文写作：上传模板文件并接入模板库 */
@@ -96,19 +143,40 @@ export function saveAiModelConfig(payload) {
 export function generateAiDocument(payload) {
   const formData = new FormData()
   ;(payload.files || []).forEach(f => formData.append('files', f))
+  ;(payload.materialFiles || []).forEach(f => formData.append('material_files', f))
+  ;(payload.templateFiles || []).forEach(f => formData.append('template_files', f))
   formData.append('prompt', payload.prompt || '')
   formData.append('request_url', payload.requestUrl || '')
   formData.append('api_key', payload.apiKey || '')
   formData.append('model_name', payload.modelName || '')
   formData.append('template_id', payload.templateId || '')
   formData.append('temperature', String(payload.temperature ?? 0.2))
+  formData.append('speed_mode', payload.speedMode || 'standard')
+  formData.append('strict_reference_isolation', payload.strictReferenceIsolation ? 'true' : 'false')
   return api.post('/ai/generate', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 600000,
+    // 多材料 + 多轮模型调用；高并发排队时整次生成可能超过 10 分钟
+    timeout: 900000,
+    signal: payload.signal,
   })
 }
 
-/** AI 公文写作：下载生成后的正式 docx */
+/** 查询公文调度任务状态与节点日志 */
+export function getAiTask(taskId) {
+  return api.get(`/ai/tasks/${taskId}`, { timeout: 60000 })
+}
+
+/** AI 公文写作：下载生成后的正式 docx（统一走工作台 fileId 通道时优先用 downloadFile） */
 export function downloadAiDocument(documentId) {
-  return api.get(`/ai/download/${documentId}`, { responseType: 'blob' })
+  return api.get(`/ai/download/${documentId}`, { responseType: 'blob' }).then((res) => ensureBlobOk(res, 'AI 生成文件不存在或已过期，请重新生成'))
+}
+
+/** LibreOffice 真实渲染校验 */
+export function renderCheck(fileId) {
+  return api.get(`/render-check/${fileId}`, { timeout: 120000 })
+}
+
+/** 下载真实渲染 PDF */
+export function downloadRenderPdf(fileId) {
+  return api.get(`/render-pdf/${fileId}`, { responseType: 'blob' }).then((res) => ensureBlobOk(res, '渲染 PDF 不存在，请先执行真实渲染校验'))
 }

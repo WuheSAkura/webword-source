@@ -39,14 +39,17 @@
           :selectedFile="selectedFile"
           :data="structureData"
           :labels="roleLabels"
-          :loading="previewLoading"
+          :loading="structureLoading"
+          :error="structureError"
           @changeRole="handleChangeRole"
         />
         <PreviewPanel
           v-show="activeTab === 'result'"
           :selectedFile="selectedFile"
           :resultData="resultData"
-          :loading="previewLoading"
+          :loading="resultLoading"
+          :error="resultError"
+          @updated="handlePreviewUpdated"
         />
       </div>
 
@@ -73,7 +76,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElLoading } from 'element-plus'
 import FileList from './components/FileList.vue'
 import StructurePanel from './components/StructurePanel.vue'
 import PreviewPanel from './components/PreviewPanel.vue'
@@ -81,7 +84,7 @@ import ActionPanel from './components/ActionPanel.vue'
 import AiWritingAssistant from './components/AiWritingAssistant.vue'
 import {
   uploadFiles, getStructure, getFormatConfig, previewResult,
-  convertFile, downloadFile, clearAll,
+  convertFile, downloadFile, clearAll, deleteFile, readBlobError,
 } from './api/index.js'
 
 const fileList = ref([])
@@ -89,10 +92,16 @@ const selectedId = ref(null)
 const activeTab = ref('structure')
 const structureData = ref(null)
 const resultData = ref(null)
-const previewLoading = ref(false)
+const structureLoading = ref(false)
+const resultLoading = ref(false)
+const structureError = ref('')
+const resultError = ref('')
 const roleLabels = ref({})
 const templateOptions = ref([])
 const defaultTemplateId = ref('generic')
+const MAX_UPLOAD_BATCH = 20
+let structureRequestId = 0
+let resultRequestId = 0
 
 // 缓存每个文件的结构清单与结果预览 { fid: { structure, result } }
 const cache = ref({})
@@ -127,34 +136,50 @@ function refreshDisplay(fid) {
   const c = getCache(fid)
   structureData.value = c.structure || null
   resultData.value = c.result || null
+  structureError.value = c.structureError || ''
+  resultError.value = c.resultError || ''
 }
 
 async function loadStructure(fid) {
   const file = fileList.value.find(item => item.id === fid)
   const templateId = file?.templateId || defaultTemplateId.value
-  previewLoading.value = true
+  const requestId = ++structureRequestId
+  structureLoading.value = true
   try {
     const res = await getStructure(fid, templateId)
+    if (requestId !== structureRequestId) return
     const current = fileList.value.find(item => item.id === fid)
-    if (current && current.templateId === templateId) getCache(fid).structure = res.data
-  } catch {
+    if (current && current.templateId === templateId) {
+      getCache(fid).structure = res.data
+      getCache(fid).structureError = ''
+    }
+  } catch (err) {
+    if (requestId !== structureRequestId) return
     const current = fileList.value.find(item => item.id === fid)
-    if (current && current.templateId === templateId) getCache(fid).structure = null
+    if (current && current.templateId === templateId) {
+      getCache(fid).structure = null
+      getCache(fid).structureError = err.response?.data?.detail || err.message || '结构识别失败'
+    }
   } finally {
-    previewLoading.value = false
+    if (requestId === structureRequestId) structureLoading.value = false
     if (selectedId.value === fid) refreshDisplay(fid)
   }
 }
 
 async function loadResultData(fid) {
-  previewLoading.value = true
+  const requestId = ++resultRequestId
+  resultLoading.value = true
   try {
     const res = await previewResult(fid)
+    if (requestId !== resultRequestId) return
     getCache(fid).result = res.data
-  } catch {
+    getCache(fid).resultError = ''
+  } catch (err) {
+    if (requestId !== resultRequestId) return
     getCache(fid).result = null
+    getCache(fid).resultError = err.response?.data?.detail || err.message || '结果预览加载失败，文件可能已过期'
   } finally {
-    previewLoading.value = false
+    if (requestId === resultRequestId) resultLoading.value = false
     if (selectedId.value === fid) refreshDisplay(fid)
   }
 }
@@ -162,6 +187,9 @@ async function loadResultData(fid) {
 function setActiveTab(tab) {
   if (tab === 'result' && !resultAvailable.value) return
   activeTab.value = tab
+  if (tab === 'result' && selectedId.value && !getCache(selectedId.value).result && selectedFile.value?.status === 'completed') {
+    loadResultData(selectedId.value)
+  }
 }
 
 function setFileStatus(fid, status) {
@@ -171,8 +199,19 @@ function setFileStatus(fid, status) {
 
 // ── handlers ──
 async function handleUpload(files) {
-  const docxFiles = Array.from(files).filter(f => f.name.toLowerCase().endsWith('.docx'))
-  if (docxFiles.length === 0) { ElMessage.warning('请选择 .docx 文件'); return }
+  const allFiles = Array.from(files || [])
+  if (allFiles.length > MAX_UPLOAD_BATCH) {
+    ElMessage.warning(`单次最多上传 ${MAX_UPLOAD_BATCH} 个文件，已忽略超出部分`)
+  }
+  const batch = allFiles.slice(0, MAX_UPLOAD_BATCH)
+  const docxFiles = batch.filter(f => f.name.toLowerCase().endsWith('.docx'))
+  const rejectedLocal = batch
+    .filter(f => !f.name.toLowerCase().endsWith('.docx'))
+    .map(f => `${f.name}：仅支持 .docx 文件`)
+  if (docxFiles.length === 0) {
+    ElMessage.warning(rejectedLocal.length ? `没有可上传的文件。${rejectedLocal.slice(0, 3).join('；')}` : '请选择 .docx 文件')
+    return
+  }
   try {
     const res = await uploadFiles(docxFiles)
     if (res.data.success) {
@@ -180,7 +219,13 @@ async function handleUpload(files) {
         fileList.value.push({ ...item, status: 'pending', templateId: defaultTemplateId.value })
       }
       if (!selectedId.value && fileList.value.length > 0) await selectFile(fileList.value[0].id)
-      ElMessage.success(`已添加 ${res.data.files.length} 个文件`)
+      const skipped = res.data.skipped || []
+      const skippedText = [...rejectedLocal, ...skipped.map(item => `${item.filename}：${item.reason}`)]
+      if (skippedText.length) {
+        ElMessage.warning(`已添加 ${res.data.files.length} 个文件，跳过 ${skippedText.length} 个：${skippedText.slice(0, 3).join('；')}`)
+      } else {
+        ElMessage.success(`已添加 ${res.data.files.length} 个文件`)
+      }
     }
   } catch (err) {
     ElMessage.error('上传失败: ' + (err.response?.data?.detail || err.message))
@@ -214,10 +259,15 @@ async function handleAiGenerated(payload) {
       }
     }
   }
-  await selectFile(generatedFiles[0].id)
+  const firstId = generatedFiles[0].id
+  await selectFile(firstId)
   activeTab.value = 'result'
-  if (!getCache(generatedFiles[0].id).result) await loadResultData(generatedFiles[0].id)
-  refreshDisplay(generatedFiles[0].id)
+  if (!getCache(firstId).result) {
+    await loadResultData(firstId)
+  } else {
+    resultLoading.value = false
+    refreshDisplay(firstId)
+  }
 }
 
 async function selectFile(fid) {
@@ -230,12 +280,19 @@ async function selectFile(fid) {
 async function handleSelect(fid) { await selectFile(fid) }
 
 async function handleRemove(fid) {
+  try {
+    await deleteFile(fid)
+  } catch {
+    // 本地列表仍移除；服务端可能已过期
+  }
   fileList.value = fileList.value.filter(f => f.id !== fid)
   delete cache.value[fid]
   if (selectedId.value === fid) {
     selectedId.value = fileList.value[0]?.id || null
     structureData.value = null
     resultData.value = null
+    structureError.value = ''
+    resultError.value = ''
     if (selectedId.value) await selectFile(selectedId.value)
   }
 }
@@ -313,20 +370,54 @@ async function handleProcess(fid) {
   else ElMessage.success(`批量处理完成，共处理 ${ok} 个文件`)
 }
 
+async function handlePreviewUpdated(payload) {
+  const fid = selectedId.value
+  if (!fid || !payload?.paragraphs) return
+  const cached = {
+    success: true,
+    name: selectedFile.value?.name,
+    type: 'processed',
+    paragraphs: payload.paragraphs,
+  }
+  getCache(fid).result = cached
+  if (selectedId.value === fid) {
+    resultData.value = cached
+    resultError.value = ''
+  }
+}
+
 async function handleDownload(fid) {
   const targetId = fid || selectedId.value
   if (!targetId) return
+  const loading = ElLoading.service({ text: '准备下载...', background: 'rgba(255,255,255,0.6)' })
   try {
-    const res = await downloadFile(targetId)
+    const res = await downloadFile(targetId, {
+      onProgress(event) {
+        if (!event.total) return
+        const pct = Math.min(99, Math.round((event.loaded / event.total) * 100))
+        loading.setText(`下载中 ${pct}%`)
+      },
+    })
     const file = fileList.value.find(f => f.id === targetId)
-    const name = file ? file.name.replace('.docx', '_公文格式.docx') : '公文格式.docx'
-    const url = window.URL.createObjectURL(new Blob([res.data]))
+    const rawName = file?.name || '公文.docx'
+    const stem = rawName.replace(/\.docx$/i, '')
+    const name = (stem.endsWith('_AI公文') || stem.endsWith('_公文格式'))
+      ? `${stem}.docx`
+      : `${stem}_公文格式.docx`
+    const url = window.URL.createObjectURL(new Blob([res.data], {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }))
     const link = document.createElement('a')
     link.href = url; link.download = name
     document.body.appendChild(link); link.click(); document.body.removeChild(link)
     window.URL.revokeObjectURL(url)
     ElMessage.success('下载完成')
-  } catch { ElMessage.error('下载失败') }
+  } catch (err) {
+    const detail = await readBlobError(err, '下载失败，文件可能已过期，请重新处理或重新生成')
+    ElMessage.error(detail)
+  } finally {
+    loading.close()
+  }
 }
 
 async function handleClearAll() {
@@ -335,6 +426,8 @@ async function handleClearAll() {
   selectedId.value = null
   structureData.value = null
   resultData.value = null
+  structureError.value = ''
+  resultError.value = ''
   cache.value = {}
 }
 </script>

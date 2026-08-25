@@ -7,7 +7,9 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:8001',
+        // Windows 上 localhost 可能优先解析到 ::1，而本地 FastAPI 通常只监听 IPv4。
+        // 本地开发默认 8010：8001 常被其他项目（如 xianyu_backend Docker）占用。
+        target: process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8010',
         changeOrigin: true,
       },
     },

@@ -14,11 +14,21 @@ Verification: `npm run build` completes and `http://localhost:3000` returns HTTP
 
 Symptom: backend cannot bind to port `8000`, or another project is already listening there.
 
-Cause: this workspace's Vite proxy targets `localhost:8001`, while another local service may use `8000`.
+Cause: Docker `webword` uses `8000`; non-Docker local development uses a separate backend port.
 
-Fix: Start this backend on `8001`, not `8000`.
+Fix: Start this backend on `8010`, not `8000`.
 
-Verification: `http://localhost:8001/api/health` returns `{"status":"ok"}`.
+Verification: `http://localhost:8010/api/health` returns `{"status":"ok"}`.
+
+## AI templates stuck on “正在加载模板...”
+
+Symptom: the assistant panel shows `正在加载模板...` forever, or the browser Network tab shows `/api/ai/templates` returning 404/`Not Found`.
+
+Cause: Vite proxies `/api` to `127.0.0.1:8001`, but that address was occupied by another stack (`xianyu_backend` Docker on `127.0.0.1:8001`, plus an unrelated Python `app.py` on `0.0.0.0:8001`). On Windows, the more specific `127.0.0.1` bind wins for localhost, so the frontend never reaches this project's FastAPI. Template data itself was fine (`template_library.db` already had 15 rows).
+
+Fix: Point the Vite proxy and local restart script at backend port `8010` (`frontend/vite.config.js`, `skills/project-local-run/scripts/restart-local-project.ps1`), then restart with the non-Docker script.
+
+Verification: `Invoke-RestMethod http://127.0.0.1:8010/api/ai/templates` returns exactly 15 entries; opening the assistant no longer stays on `正在加载模板...`.
 
 ## Frontend import fails for AiWritingAssistant.vue
 
@@ -72,13 +82,33 @@ Verification: restart script proceeds past log initialization and launches servi
 
 ## Uploaded Chinese filenames can become invalid temp paths
 
-Symptom: AI generation returns HTTP 500 with `Invalid argument` and a temp path containing `??`.
+Symptom: AI generation returns HTTP 500 with `Invalid argument`, `No such file or directory`, or a temp path containing `??` / `%E2%91`.
 
-Cause: the current Windows/Python upload path can lose non-ASCII filename characters when the filename is used directly in the temp file path.
+Cause: embedding URL-encoded Chinese stems in `backend/temp` paths can exceed Windows path limits or break reads; writing uploads to `backend/temp` while uvicorn `--reload-dir backend` is enabled can also restart the worker mid-request.
 
-Fix: save upload files using an ASCII-safe encoded temp filename, and decode the original stem only for display/download names.
+Fix: save uploads as short ASCII `{uuid}{suffix}` files with a sidecar `{uuid}{suffix}.upload.json` for the original filename; exclude `temp/*` and `template_library.db` from uvicorn reload in `restart-local-project.ps1`.
 
-Verification: uploading multiple files returns one generated document per source file with readable output filenames.
+Verification: uploading long Chinese filenames returns one generated document per source file with readable output filenames and no temp-path 500.
+
+## Strict similarity control blocks without rewrite
+
+Symptom: with strict reference isolation enabled, generation fails with `严格模式下检测到参考范文事实可能串入成文` or high source-copy overlap, and no usable document is returned.
+
+Cause: the pipeline only raised on similarity risk and retried once with a generic parse-repair prompt that still exposed full reference text.
+
+Fix: on similarity failures, automatically enter semantic rewrite mode up to `AI_MAX_GENERATION_GUARD_ATTEMPTS` (default 4): hide reference body, keep template skeleton + transformation plan, raise drafting temperature slightly, and instruct the model to paraphrase source facts without copying reference phrasing.
+
+Verification: strict-mode generation on long case materials completes or reports `similarityRewrites > 0` in generation metadata instead of failing on the first overlap.
+
+## Missing title aborts generation
+
+Symptom: AI generation fails with `模型仿写缺少目标公文大标题`.
+
+Cause: the drafting model sometimes omitted `[[title]]`, and the pipeline raised immediately instead of filling the missing required field.
+
+Fix: detect missing required roles from the cached template structure JSON, then run permission-isolated targeted fill (rule-based title first, AI only for remaining missing fields) without rewriting already-valid paragraphs; finally render with backend format rules.
+
+Verification: generating with materials that previously failed for missing title returns a document whose first role is `title`, and `generation.targetedFill.filledRoles` may include `title`.
 
 ## Docker frontend build reports npm audit vulnerabilities
 
@@ -109,3 +139,13 @@ Cause: `0` means the root template source directory `20260623--整理汇总常�
 Fix: In `Dockerfile`, copy the root template source directory into `/app`. In `.dockerignore`, exclude `backend/template_library.db`. In `backend/ai_writer.py`, make `sync_template_library()` clear `document_templates` before inserting the current runtime scan.
 
 Verification: rebuild with `docker compose up -d --build webword`, then `Invoke-RestMethod http://localhost:8000/api/ai/templates` returns exactly 15 entries ordered from `1决议` through `15纪要`.
+
+## Local restart script stops Docker Desktop
+
+Symptom: after `restart-local-project.ps1`, `docker info` fails with `open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified`, and `com.docker.backend` / `wslrelay` are gone.
+
+Cause: if Docker/WSL is temporarily listening on local backend port `8010`, the restart script's `Stop-PortProcess` force-kills that PID and can take down Docker Desktop.
+
+Fix: restart Docker Desktop (`Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"`), wait until `docker info` succeeds, then redeploy with `deploy-local-docker.ps1`. Prefer verifying port owners before killing; do not stop `com.docker.backend` / `wslrelay` / `Docker Desktop` for local 8010 cleanup.
+
+Verification: `docker ps` works, `webword` is healthy on `http://localhost:8000`, and local `http://127.0.0.1:8010/api/health` still returns ok.

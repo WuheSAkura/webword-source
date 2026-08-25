@@ -1,16 +1,18 @@
 <template>
   <div class="structure-panel" v-loading="loading">
-    <div class="struct-header" v-if="data">
+    <div class="struct-header" v-if="data || error">
       <div class="struct-title">
         <span>识别结果 · 共 {{ paragraphs.length }} 段</span>
         <span class="low-tip" v-if="lowCount > 0">⚠ {{ lowCount }} 段低置信，请复核</span>
       </div>
       <p class="struct-hint">逐段确认类型后，点右侧「套用格式」生成公文。</p>
+      <p v-if="error" class="struct-error">{{ error }}</p>
     </div>
 
     <div class="struct-body">
       <el-empty v-if="!selectedFile" description="选择左侧文件即可识别" :image-size="90" />
       <el-empty v-else-if="loading" description="识别中..." :image-size="60" />
+      <el-empty v-else-if="error" :description="error" :image-size="60" />
       <el-empty v-else-if="!data || !paragraphs.length" description="暂无可识别段落" :image-size="60" />
       <template v-else>
         <div
@@ -49,6 +51,7 @@ const props = defineProps({
   data: Object,
   labels: { type: Object, default: () => ({}) },
   loading: Boolean,
+  error: { type: String, default: '' },
 })
 const emit = defineEmits(['changeRole'])
 
@@ -79,6 +82,7 @@ function emitChange(index, role) {
 .struct-title { display: flex; align-items: center; gap: 14px; color: #1a3a5c; font-size: 14px; font-weight: 700; }
 .low-tip { color: #c05621; font-size: 12px; font-weight: 600; }
 .struct-hint { margin: 4px 0 0; color: #7a8997; font-size: 12px; }
+.struct-error { margin: 6px 0 0; color: #c05621; font-size: 12px; font-weight: 600; }
 .struct-body { flex: 1; overflow-y: auto; padding: 8px 12px; background: #fbfdff; }
 .struct-row {
   display: grid; grid-template-columns: 32px 1fr 48px 130px; align-items: center; gap: 10px;
