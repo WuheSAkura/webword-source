@@ -43,7 +43,7 @@
               <div>
                 <div class="result-title">已生成文件</div>
                 <div class="result-subtitle">
-                  共 {{ result.documents?.length || 1 }} 份（每份材料单独成文，不会自动汇总） · 模型：{{ modelName || '默认模型' }}
+                  共 {{ result.documents?.length || 1 }} 份（每份材料单独成文，不会自动汇总）
                 </div>
               </div>
             </div>
@@ -100,7 +100,7 @@
               </details>
             </div>
             <div v-if="result?.stages" class="stage-meta">
-              提取 {{ result.stages.extractionSeconds || 0 }} 秒 · 成文 {{ result.stages.draftingSeconds || 0 }} 秒 · {{ result.stages.rendering }}
+              提取 {{ result.stages.extractionSeconds || 0 }} 秒 · 整理 {{ result.stages.prepSeconds || 0 }} 秒 · 策划 {{ result.stages.planSeconds || 0 }} 秒 · 成文 {{ result.stages.draftingSeconds || 0 }} 秒 · {{ result.stages.rendering }}
             </div>
             <pre class="result-preview">{{ result.preview }}</pre>
           </div>
@@ -109,8 +109,8 @@
         <textarea
           v-model="prompt"
           class="ai-input"
-          rows="2"
-          placeholder="请输入写作要求，例如：根据上传材料起草一份关于加强食品安全检查工作的通知"
+          rows="3"
+          placeholder="写作要求优先。有上传文件时：在此填写定制要求（语气、侧重、结构等）。无文件时可用：【写作要求】……【材料】……；或短要求后空一行写 --- 再粘贴材料。仅粘贴长文时将根据材料创作正式公文。"
           @keydown.ctrl.enter.prevent="handleGenerate"
         />
 
@@ -129,7 +129,7 @@
 
         <div class="button-group">
           <div class="suggest-btn-wrapper">
-            <button type="button" class="ai-button suggest" title="上传公文模板" @click="triggerTemplateUpload">
+            <button type="button" class="ai-button suggest" title="上传公文模板" @click="$emit('open-template-manager')">
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" height="24" width="24">
                 <path
                   fill="currentColor"
@@ -140,32 +140,13 @@
               </svg>
                 <span class="search-text">上传模板</span>
             </button>
-            <input
-              ref="templateUploadInput"
-              type="file"
-              multiple
-              accept=".docx,.txt,.pdf,.png,.jpg,.jpeg,.bmp,.tiff,.wps,.ofd"
-              hidden
-              @change="handleTemplateFiles"
-            />
           </div>
 
           <div class="option-group">
-            <label for="ai-file-input" class="ai-button voice" title="上传材料（DOCX/TXT/PDF/图片）">
+            <label for="ai-file-input" class="ai-button upload-file-btn" title="上传材料（DOCX/TXT/PDF/图片）">
               <input id="ai-file-input" type="file" multiple accept=".docx,.txt,.pdf,.png,.jpg,.jpeg,.bmp,.tiff" @change="handleFiles" />
-              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" class="ai-icon">
-                <path d="M9.5 4C8.67157 4 8 4.67157 8 5.5V18.5C8 19.3284 8.67157 20 9.5 20C10.3284 20 11 19.3284 11 18.5V5.5C11 4.67157 10.3284 4 9.5 4Z" fill="currentColor" class="bar bar-1" />
-                <path d="M13 8.5C13 7.67157 13.6716 7 14.5 7C15.3284 7 16 7.67157 16 8.5V15.5C16 16.3284 15.3284 17 14.5 17C13.6716 17 13 16.3284 13 15.5V8.5Z" fill="currentColor" class="bar bar-2" />
-                <path d="M4.5 9C3.67157 9 3 9.67157 3 10.5V13.5C3 14.3284 3.67157 15 4.5 15C5.32843 15 6 14.3284 6 13.5V10.5C6 9.67157 5.32843 9 4.5 9Z" fill="currentColor" class="bar bar-3" />
-                <path d="M19.5 9C18.6716 9 18 9.67157 18 10.5V13.5C18 14.3284 18.6716 15 19.5 15C20.3284 15 21 14.3284 21 13.5V10.5C21 9.67157 20.3284 9 19.5 9Z" fill="currentColor" class="bar bar-4" />
-              </svg>
+              <span class="upload-file-text">上传文件</span>
             </label>
-            <button type="button" class="ai-button image" title="模型服务配置" @click="showSettings = !showSettings">
-              <span class="tool-text">参</span>
-            </button>
-            <button type="button" class="ai-button camera" title="定位到模板选择" @click="focusTemplateSelect">
-              <span class="tool-text">模</span>
-            </button>
             <button type="button" class="ai-button submit" :disabled="generating" @click="handleGenerate">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" class="ai-icon small">
                 <path
@@ -184,17 +165,22 @@
           <div v-if="templatesLoading" class="template-meta">正在加载模板...</div>
           <button v-else-if="templatesError" type="button" class="template-retry" @click="refreshTemplates(true)">重新加载模板</button>
           <div class="template-radio-list">
-            <label class="template-radio" :class="{ active: templateId === '' }">
-              <input v-model="templateId" type="radio" value="" />
+            <label class="template-radio" :class="{ active: !templateKey }">
+              <input v-model="templateKey" type="radio" value="" @change="templateId = ''" />
               <span>请选择目标文种</span>
             </label>
             <label
               v-for="template in templates"
-              :key="template.id + template.name"
+              :key="template.templateKey || (template.id + template.name)"
               class="template-radio"
-              :class="{ active: templateId === template.id }"
+              :class="{ active: templateKey === template.templateKey }"
             >
-              <input v-model="templateId" type="radio" :value="template.id" />
+              <input
+                v-model="templateKey"
+                type="radio"
+                :value="template.templateKey"
+                @change="templateId = template.id"
+              />
               <span>{{ template.name }}</span>
               <em>{{ template.label }} / 共 {{ template.fileCount }} 份 / 体例样本 {{ template.availableReferenceCount || 0 }} 份</em>
             </label>
@@ -231,29 +217,12 @@
           <small class="template-meta">{{ selectedSpeed.description }}</small>
           <label class="strict-toggle">
             <input v-model="strictReferenceIsolation" type="checkbox" />
-            <span>严格范文隔离（检测到范文事实串入时阻断成文）</span>
+            <span>严格范文隔离（默认关闭；开启后若判定范文事实串入会反复重构，易导致生成失败）</span>
           </label>
-        </div>
-
-        <div v-if="showSettings" class="config-panel">
-          <label>模型服务地址</label>
-          <input v-model="requestUrl" class="ai-setting-input" placeholder="例如：https://api.deepseek.com 或内网 /v1 地址" />
-          <label>API Key</label>
-          <input v-model="apiKey" class="ai-setting-input" type="password" placeholder="已配置则显示掩码；留空或保持掩码则不改动" />
-          <label>模型选择</label>
-          <div class="model-row">
-            <select v-model="modelName" class="ai-select">
-              <option v-for="model in modelOptions" :key="model" :value="model">{{ model }}</option>
-            </select>
-            <button type="button" class="save-config-button" @click="saveModelSettings">保存</button>
-            <button type="button" class="save-config-button secondary" @click="messages = []">清空对话</button>
-          </div>
-          <input
-            v-model="customModelName"
-            class="ai-setting-input"
-            placeholder="新增模型名称，回车加入列表"
-            @keydown.enter.prevent="addCustomModel"
-          />
+          <label class="strict-toggle" title="默认关闭。开启后材料整理或结构策划失败时回退为规则方案继续生成。">
+            <input v-model="allowDegradation" type="checkbox" />
+            <span>允许降级处理（材料整理/结构策划失败时回退；默认关闭以保证创作质量）</span>
+          </label>
         </div>
       </div>
     </div>
@@ -261,31 +230,30 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, defineExpose, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   downloadAiDocument,
   downloadFile,
   generateAiDocument,
-  getAiModelConfig,
   getAiTemplates,
   readBlobError,
-  saveAiModelConfig,
   syncAiTemplates,
-  uploadAiTemplates,
 } from '../api/index.js'
 
-const emit = defineEmits(['generated'])
+const emit = defineEmits(['generated', 'open-template-manager'])
 const open = ref(false)
 const prompt = ref('')
 const files = ref([])
 const templateFiles = ref([])
 const templates = ref([])
 const templateId = ref('')
+const templateKey = ref('')
 const templatesLoading = ref(false)
 const templatesError = ref(false)
 const speedMode = ref('standard')
-const strictReferenceIsolation = ref(true)
+const strictReferenceIsolation = ref(false)
+const allowDegradation = ref(false)
 const MAX_AI_UPLOAD_BATCH = 20
 const speedOptions = [
   { value: 'fast', label: '极速', description: '以较低成文预算快速完成材料成文。' },
@@ -293,12 +261,6 @@ const speedOptions = [
   { value: 'deep', label: '长文', description: '以较高成文预算处理长材料与完整体例参照。' },
 ]
 const selectedSpeed = computed(() => speedOptions.find(item => item.value === speedMode.value) || speedOptions[1])
-const requestUrl = ref('')
-const apiKey = ref('')
-const modelName = ref('')
-const customModelName = ref('')
-const modelOptions = ref([])
-const showSettings = ref(false)
 const generating = ref(false)
 const generateStatusText = ref('正在匹配体例样本、按材料事实成文并排版...')
 const generateController = ref(null)
@@ -307,8 +269,12 @@ const messages = ref([])
 const assistantShellRef = ref(null)
 const assistantTopbarRef = ref(null)
 const templatePanelRef = ref(null)
-const templateUploadInput = ref(null)
-const selectedTemplate = computed(() => templates.value.find(item => item.id === templateId.value) || null)
+const selectedTemplate = computed(() => {
+  if (templateKey.value) {
+    return templates.value.find(item => item.templateKey === templateKey.value) || null
+  }
+  return templates.value.find(item => item.id === templateId.value) || null
+})
 const workflowNodes = computed(() => Object.values(result.value?.nodes || {}))
 const activeReadReport = computed(() => {
   const firstDocument = result.value?.documents?.[0]
@@ -352,7 +318,7 @@ onMounted(async () => {
     assistantResizeObserver = new ResizeObserver(() => keepAssistantInViewport())
     if (assistantShellRef.value) assistantResizeObserver.observe(assistantShellRef.value)
   }
-  await Promise.all([refreshTemplates(false), loadModelSettings()])
+  await refreshTemplates(false)
 })
 
 onBeforeUnmount(() => {
@@ -398,6 +364,7 @@ async function collapseAssistant() {
 
 function handleDocumentPointerDown(event) {
   if (!open.value || generating.value) return
+  if (event.target.closest('.el-overlay, .el-dialog, .el-message-box')) return
   if (assistantShellRef.value?.contains(event.target)) return
   collapseAssistant()
 }
@@ -490,7 +457,10 @@ async function refreshTemplates(showMessage = true) {
   templatesError.value = false
   try {
     const res = showMessage ? await syncAiTemplates() : await getAiTemplates()
-    templates.value = res.data.templates || []
+    templates.value = (res.data.templates || []).map((item) => ({
+      ...item,
+      templateKey: item.templateKey || `${item.id}::${item.sourceDir || item.name}`,
+    }))
     if (showMessage) ElMessage.success(`已收录 ${templates.value.length} 类模板`)
   } catch (err) {
     templatesError.value = true
@@ -504,34 +474,31 @@ function focusTemplateSelect() {
   templatePanelRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
 }
 
-function triggerTemplateUpload() {
-  templateUploadInput.value?.click()
-}
-
-async function handleTemplateFiles(event) {
-  const selectedFiles = Array.from(event.target.files || [])
-  event.target.value = ''
-  if (!selectedFiles.length) return
-  try {
-    const res = await uploadAiTemplates({ files: selectedFiles, templateId: templateId.value })
-    templates.value = res.data.templates || templates.value
-    ElMessage.success(`模板已入库并完成预解析，共收录 ${res.data.count || 0} 个文件`)
-  } catch (err) {
-    ElMessage.error('模板入库失败：' + (err.response?.data?.detail || err.message))
+function applyTemplateUpdate(payload) {
+  const prevKey = templateKey.value
+  templates.value = (payload.templates || []).map((item) => ({
+    ...item,
+    templateKey: item.templateKey || `${item.id}::${item.sourceDir || item.name}`,
+  }))
+  const stillSelected = templates.value.find(item => item.templateKey === prevKey)
+  if (!stillSelected) {
+    templateKey.value = ''
+    templateId.value = ''
+  }
+  const lastAssignment = (payload.assignments || []).slice(-1)[0]
+  if (!lastAssignment) return
+  const matched = templates.value.find(
+    item => item.sourceDir === lastAssignment.sourceDir
+      || item.name === lastAssignment.templateName,
+  ) || templates.value.find(item => item.id === lastAssignment.templateId)
+  if (matched) {
+    templateKey.value = matched.templateKey
+    templateId.value = matched.id
+    nextTick(() => focusTemplateSelect())
   }
 }
 
-async function loadModelSettings() {
-  try {
-    const res = await getAiModelConfig()
-    requestUrl.value = res.data.requestUrl || ''
-    apiKey.value = res.data.apiKeyConfigured ? (res.data.apiKey || '********') : ''
-    modelName.value = res.data.modelName || ''
-    modelOptions.value = res.data.models || []
-  } catch (err) {
-    ElMessage.warning('模型配置读取失败：' + (err.response?.data?.detail || err.message))
-  }
-}
+defineExpose({ applyTemplateUpdate })
 
 function handleFiles(event) {
   const selected = Array.from(event.target.files || [])
@@ -578,14 +545,6 @@ function cancelGenerate() {
   ElMessage.info('已取消生成')
 }
 
-function addCustomModel() {
-  const name = customModelName.value.trim()
-  if (!name) return
-  if (!modelOptions.value.includes(name)) modelOptions.value.push(name)
-  modelName.value = name
-  customModelName.value = ''
-}
-
 function sourceTypeLabel(type) {
   return {
     body: '正文',
@@ -601,32 +560,14 @@ function formatSimilarity(value) {
   return Number.isFinite(score) ? `${(score * 100).toFixed(1)}%` : '未知'
 }
 
-async function saveModelSettings() {
-  try {
-    const res = await saveAiModelConfig({
-      requestUrl: requestUrl.value,
-      apiKey: apiKey.value,
-      modelName: modelName.value,
-      models: modelOptions.value,
-    })
-    modelOptions.value = res.data.models || modelOptions.value
-    modelName.value = res.data.modelName || modelName.value
-    ElMessage.success('模型服务配置已保存')
-  } catch (err) {
-    ElMessage.error('模型配置保存失败：' + (err.response?.data?.detail || err.message))
-  }
-}
-
 async function handleGenerate() {
-  if (files.value.length === 0) {
-    ElMessage.warning('请先上传材料后再生成，避免无依据空写')
+  const promptText = prompt.value.trim()
+  const hasFiles = files.value.length > 0
+  if (!hasFiles && !promptText) {
+    ElMessage.warning('请上传材料文件，或在对话框填写写作要求/粘贴文本材料')
     return
   }
-  if (!prompt.value.trim() && files.value.length === 0) {
-    ElMessage.warning('请上传文件或填写写作要求')
-    return
-  }
-  if (!templateId.value) {
+  if (!templateKey.value || !templateId.value) {
     ElMessage.warning('请选择目标公文模板')
     focusTemplateSelect()
     return
@@ -637,9 +578,59 @@ async function handleGenerate() {
     return
   }
 
+  // 对话框：用户定制要求优先；无文件时可拆【写作要求】/【材料】或 --- 分隔
+  let writingPrompt = ''
+  let materialTextPayload = ''
+  const DEFAULT_WRITING =
+    '请根据下列材料创作正式公文：按目标文种设计篇章结构，提炼主题、组织论述，用规范公文语体独立成文；紧扣材料全部相关事实，不编造数据、单位、日期及材料未提供的情节。'
+
+  const splitDialog = (raw) => {
+    const text = String(raw || '').trim()
+    if (!text) return { prompt: '', material: '' }
+    const reqIdx = text.search(/【(?:写作)?要求】\s*/)
+    const matIdx = text.search(/【材料】\s*/)
+    if (reqIdx >= 0 && matIdx > reqIdx) {
+      const afterReq = text.slice(reqIdx).replace(/^【(?:写作)?要求】\s*/, '')
+      const parts = afterReq.split(/【材料】\s*/)
+      return { prompt: (parts[0] || '').trim(), material: (parts[1] || '').trim() }
+    }
+    if (matIdx >= 0) {
+      return {
+        prompt: text.slice(0, matIdx).replace(/^【(?:写作)?要求】\s*/, '').trim(),
+        material: text.slice(matIdx).replace(/^【材料】\s*/, '').trim(),
+      }
+    }
+    const sep = text.match(/\n\s*-{3,}\s*\n/)
+    if (sep && sep.index != null) {
+      const left = text.slice(0, sep.index).trim()
+      const right = text.slice(sep.index + sep[0].length).trim()
+      if (right && left && left.length <= 800) return { prompt: left, material: right }
+    }
+    return { prompt: '', material: text }
+  }
+
+  if (hasFiles) {
+    writingPrompt = promptText || DEFAULT_WRITING
+    materialTextPayload = ''
+  } else {
+    const split = splitDialog(promptText)
+    if (split.material && (split.prompt || split.material !== promptText)) {
+      writingPrompt = split.prompt || DEFAULT_WRITING
+      materialTextPayload = split.material
+    } else if (promptText.length >= 200) {
+      writingPrompt = DEFAULT_WRITING
+      materialTextPayload = promptText
+    } else {
+      writingPrompt = promptText || DEFAULT_WRITING
+      materialTextPayload = promptText
+    }
+  }
+
   const userText = [
-    prompt.value.trim() || '根据上传文件生成正式公文',
-    files.value.length ? `已上传 ${files.value.length} 个文件（将分别生成 ${files.value.length} 份公文）` : '',
+    writingPrompt,
+    hasFiles
+      ? `已上传 ${files.value.length} 个文件（将分别生成 ${files.value.length} 份公文）`
+      : '材料来源：对话框文本（免文件提取；用户提示优先）',
   ].filter(Boolean).join('\n')
 
   messages.value = [
@@ -648,22 +639,24 @@ async function handleGenerate() {
   ]
   generating.value = true
   result.value = null
-  generateStatusText.value = files.value.length > 1
+  generateStatusText.value = hasFiles && files.value.length > 1
     ? `正在逐份处理 ${files.value.length} 份材料（每份单独成文）...`
-    : '正在匹配体例样本、按材料事实成文并排版...'
+    : hasFiles
+      ? '正在匹配体例样本、基于材料创作成文并排版...'
+      : '正在根据对话框材料创作成文并排版...'
   const controller = new AbortController()
   generateController.value = controller
 
   try {
     const res = await generateAiDocument({
       materialFiles: files.value,
-      prompt: prompt.value,
-      requestUrl: requestUrl.value,
-      apiKey: apiKey.value,
-      modelName: modelName.value,
+      prompt: writingPrompt,
+      materialText: materialTextPayload,
       templateId: templateId.value,
+      templateKey: templateKey.value,
       speedMode: speedMode.value,
       strictReferenceIsolation: strictReferenceIsolation.value,
+      allowDegradation: allowDegradation.value,
       signal: controller.signal,
     })
     result.value = res.data
@@ -1140,7 +1133,37 @@ async function handleDownload(generatedDoc = null) {
   to { transform: scale(9, 3) rotate(0); }
 }
 
-.ai-button.voice,
+.ai-button.upload-file-btn {
+  box-sizing: border-box;
+  width: auto;
+  min-width: 84px;
+  max-width: 100%;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: #6f42c1;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.ai-button.upload-file-btn:hover {
+  background: #5936a2;
+}
+
+.upload-file-text {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.ai-button.upload-file-btn input[type="file"] {
+  display: none;
+}
+
 .ai-button.image,
 .ai-button.camera {
   justify-content: center;
@@ -1164,14 +1187,6 @@ async function handleDownload(generatedDoc = null) {
 .tool-text {
   font-size: 13px;
   font-weight: 800;
-}
-
-.ai-button.voice {
-  background: #6f42c1;
-}
-
-.ai-button.voice:hover {
-  background: #5936a2;
 }
 
 .bar {

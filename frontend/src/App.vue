@@ -16,6 +16,8 @@
           @process="handleProcess"
           @download="handleDownload"
           @clearAll="handleClearAll"
+          @openModelConfig="modelConfigVisible = true"
+          @openProofread="proofreadVisible = true"
         />
       </div>
 
@@ -70,7 +72,21 @@
         />
       </div>
     </div>
-    <AiWritingAssistant @generated="handleAiGenerated" />
+    <AiWritingAssistant
+      ref="aiAssistantRef"
+      @generated="handleAiGenerated"
+      @open-template-manager="templateManagerVisible = true"
+    />
+    <ModelConfigDialog v-model:visible="modelConfigVisible" />
+    <TemplateUploadDialog
+      v-model:visible="templateManagerVisible"
+      @updated="handleAiTemplatesUpdated"
+    />
+    <ProofreadAssistant
+      :visible="proofreadVisible"
+      :platform-files="fileList"
+      @close="proofreadVisible = false"
+    />
   </div>
 </template>
 
@@ -82,6 +98,9 @@ import StructurePanel from './components/StructurePanel.vue'
 import PreviewPanel from './components/PreviewPanel.vue'
 import ActionPanel from './components/ActionPanel.vue'
 import AiWritingAssistant from './components/AiWritingAssistant.vue'
+import ProofreadAssistant from './components/ProofreadAssistant.vue'
+import ModelConfigDialog from './components/ModelConfigDialog.vue'
+import TemplateUploadDialog from './components/TemplateUploadDialog.vue'
 import {
   uploadFiles, getStructure, getFormatConfig, previewResult,
   convertFile, downloadFile, clearAll, deleteFile, readBlobError,
@@ -99,6 +118,10 @@ const resultError = ref('')
 const roleLabels = ref({})
 const templateOptions = ref([])
 const defaultTemplateId = ref('generic')
+const proofreadVisible = ref(false)
+const modelConfigVisible = ref(false)
+const templateManagerVisible = ref(false)
+const aiAssistantRef = ref(null)
 const MAX_UPLOAD_BATCH = 20
 let structureRequestId = 0
 let resultRequestId = 0
@@ -230,6 +253,10 @@ async function handleUpload(files) {
   } catch (err) {
     ElMessage.error('上传失败: ' + (err.response?.data?.detail || err.message))
   }
+}
+
+async function handleAiTemplatesUpdated(payload) {
+  aiAssistantRef.value?.applyTemplateUpdate?.(payload)
 }
 
 async function handleAiGenerated(payload) {

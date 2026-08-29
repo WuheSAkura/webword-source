@@ -149,3 +149,13 @@ Cause: if Docker/WSL is temporarily listening on local backend port `8010`, the 
 Fix: restart Docker Desktop (`Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"`), wait until `docker info` succeeds, then redeploy with `deploy-local-docker.ps1`. Prefer verifying port owners before killing; do not stop `com.docker.backend` / `wslrelay` / `Docker Desktop` for local 8010 cleanup.
 
 Verification: `docker ps` works, `webword` is healthy on `http://localhost:8000`, and local `http://127.0.0.1:8010/api/health` still returns ok.
+
+## 公文纠错上传返回 Not Found
+
+Symptom: 公文纠错弹窗里本地上传报错 `Not Found`；后端日志可见 `POST /api/proofread/upload 404`。
+
+Cause: 不是缺预览/处理工具。`uvicorn --reload` 在改动 `proofread.py` / `app.py` 后热重载卡住（端口仍 Listen，但 worker 未加载新路由，甚至 health 超时），请求落到默认 404，detail 即为英文 `Not Found`。
+
+Fix: 强制结束占用 `8010` 的 python 进程后重启本项目后端（或跑 `restart-local-project.ps1`）；确认 `openapi.json` 含 `/api/proofread/upload` 且对该接口 POST 返回 200。
+
+Verification: `Invoke-RestMethod`/`curl` 上传一个 `.docx` 到 `http://127.0.0.1:8010/api/proofread/upload` 返回 `sessionId`；前端弹窗上传可进入预览。

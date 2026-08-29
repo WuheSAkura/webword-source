@@ -45,9 +45,7 @@ function ensureBlobOk(response, fallback) {
 export function uploadFiles(files) {
   const formData = new FormData()
   files.forEach(f => formData.append('files', f))
-  return api.post('/upload', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  })
+  return api.post('/upload', formData)
 }
 
 /** 获取格式配置与角色标签 */
@@ -118,10 +116,33 @@ export function uploadAiTemplates(payload) {
   const formData = new FormData()
   ;(payload.files || []).forEach(f => formData.append('files', f))
   formData.append('template_id', payload.templateId || '')
+  formData.append('source_dir', payload.sourceDir || '')
+  formData.append('category_name', payload.categoryName || '')
+  formData.append('category_mode', payload.categoryMode || 'existing')
   return api.post('/ai/templates/upload', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 180000,
+    timeout: 300000,
   })
+}
+
+/** AI 公文写作：删除模板分类下的单个文件 */
+export function deleteAiTemplateFile(sourceDir, filename) {
+  return api.delete('/ai/templates/file', {
+    params: { source_dir: sourceDir, filename },
+    timeout: 60000,
+  })
+}
+
+/** AI 公文写作：删除整个模板分类 */
+export function deleteAiTemplateCategory(sourceDir) {
+  return api.delete('/ai/templates/category', {
+    params: { source_dir: sourceDir },
+    timeout: 60000,
+  })
+}
+
+/** AI 公文写作：文种目录（新建模板分类时选择） */
+export function getAiTemplateCatalog() {
+  return api.get('/ai/templates/catalog', { timeout: 30000 })
 }
 
 /** AI 公文写作：读取模型服务配置和可选模型 */
@@ -146,13 +167,21 @@ export function generateAiDocument(payload) {
   ;(payload.materialFiles || []).forEach(f => formData.append('material_files', f))
   ;(payload.templateFiles || []).forEach(f => formData.append('template_files', f))
   formData.append('prompt', payload.prompt || '')
+  // 无上传文件时，对话框文本可作为材料正文（免文件提取）
+  if (payload.materialText) {
+    formData.append('material_text', payload.materialText)
+  }
   formData.append('request_url', payload.requestUrl || '')
   formData.append('api_key', payload.apiKey || '')
   formData.append('model_name', payload.modelName || '')
   formData.append('template_id', payload.templateId || '')
+  if (payload.templateKey) {
+    formData.append('template_key', payload.templateKey)
+  }
   formData.append('temperature', String(payload.temperature ?? 0.2))
   formData.append('speed_mode', payload.speedMode || 'standard')
   formData.append('strict_reference_isolation', payload.strictReferenceIsolation ? 'true' : 'false')
+  formData.append('allow_degradation', payload.allowDegradation ? 'true' : 'false')
   return api.post('/ai/generate', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
     // 多材料 + 多轮模型调用；高并发排队时整次生成可能超过 10 分钟
@@ -179,4 +208,38 @@ export function renderCheck(fileId) {
 /** 下载真实渲染 PDF */
 export function downloadRenderPdf(fileId) {
   return api.get(`/render-pdf/${fileId}`, { responseType: 'blob' }).then((res) => ensureBlobOk(res, '渲染 PDF 不存在，请先执行真实渲染校验'))
+}
+
+/** 公文纠错：从平台文件创建会话 */
+export function createProofreadFromPlatform(fileId) {
+  return api.post('/proofread/from-platform', { file_id: fileId }, { timeout: 120000 })
+}
+
+/** 公文纠错：本地上传创建会话 */
+export function createProofreadFromUpload(file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  return api.post('/proofread/upload', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 180000,
+  })
+}
+
+/** 公文纠错：读取会话 */
+export function getProofreadSession(sessionId) {
+  return api.get(`/proofread/session/${sessionId}`, { timeout: 60000 })
+}
+
+/** 公文纠错：开始识别（DeepSeek） */
+export function runProofread(sessionId) {
+  return api.post(`/proofread/session/${sessionId}/run`, null, { timeout: 900000 })
+}
+
+/** 公文纠错：导出当前正文 */
+export function exportProofread(sessionId, paragraphs) {
+  return api.post(
+    `/proofread/session/${sessionId}/export`,
+    { paragraphs: paragraphs || null },
+    { responseType: 'blob', timeout: 180000 },
+  ).then((res) => ensureBlobOk(res, '导出失败'))
 }

@@ -28,19 +28,33 @@ def _node(task: dict[str, Any], name: str, status: str, **extra: Any) -> None:
 
 def run_workflow(*, prompt: str, material_paths: list[Path], template_paths: list[Path],
                  request_url: str, api_key: str, model_name: str, template_id: str | None,
+                 template_key: str | None = None,
                  temperature: float, speed_mode: str, strict_reference_isolation: bool = False,
-                 export_documents: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None) -> dict[str, Any]:
+                 allow_degradation: bool = False,
+                 export_documents: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
+                 text_materials: list[dict[str, str]] | None = None) -> dict[str, Any]:
     task_id = uuid.uuid4().hex
     task = {"taskId": task_id, "status": "running", "nodes": {}, "documents": [], "failures": []}
     TASKS[task_id] = task
     started = perf_counter()
+    text_materials = [
+        item for item in (text_materials or [])
+        if str(item.get("text") or "").strip()
+    ]
     try:
-        _node(task, "uploaded", "running", materialCount=len(material_paths), templateCount=len(template_paths))
-        if not material_paths:
-            raise ValueError("请至少上传一份业务材料后再生成")
-        _node(task, "uploaded", "completed", materialCount=len(material_paths), templateCount=len(template_paths))
+        material_count = len(material_paths) + len(text_materials)
+        _node(task, "uploaded", "running", materialCount=material_count, templateCount=len(template_paths),
+              textMaterialCount=len(text_materials), fileMaterialCount=len(material_paths))
+        if material_count < 1:
+            raise ValueError("请上传业务材料文件，或在对话框填写写作要求/粘贴文本材料后再生成")
+        _node(task, "uploaded", "completed", materialCount=material_count, templateCount=len(template_paths),
+              textMaterialCount=len(text_materials), fileMaterialCount=len(material_paths))
         _node(task, "template_parsed", "running")
-        template_rules = load_preparsed_template_rules(template_id) if template_id else parse_reference_templates(template_paths)
+        template_rules = (
+            load_preparsed_template_rules(template_id, template_key)
+            if template_id or template_key
+            else parse_reference_templates(template_paths)
+        )
         _node(task, "template_parsed", "completed", summary={
             "count": template_rules["count"],
             "filenames": [item["filename"] for item in template_rules["templates"]],
@@ -49,9 +63,11 @@ def run_workflow(*, prompt: str, material_paths: list[Path], template_paths: lis
         _node(task, "writing_skill_completed", "running")
         result = run_writing_skill(
             prompt=prompt, material_paths=material_paths, template_paths=template_paths,
+            text_materials=text_materials,
             request_url=request_url, api_key=api_key, model_name=model_name,
-            template_id=template_id, temperature=temperature, speed_mode=speed_mode,
+            template_id=template_id, template_key=template_key, temperature=temperature, speed_mode=speed_mode,
             strict_reference_isolation=strict_reference_isolation,
+            allow_degradation=allow_degradation,
             template_rules=template_rules,
         )
         _node(task, "writing_skill_completed", "completed", documentCount=len(result.get("documents", [])))

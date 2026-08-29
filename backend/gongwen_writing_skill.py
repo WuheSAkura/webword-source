@@ -8,17 +8,17 @@ from ai_writer import (
     MAX_REFERENCE_INPUT_CHARS,
     extract_document_inventory,
     generate_documents,
+    get_template_by_key,
     inventory_to_text,
-    get_template_by_id,
     load_template_references,
 )
 
 MAX_TEMPLATE_RULE_CHARS = MAX_REFERENCE_INPUT_CHARS
 
 
-def load_preparsed_template_rules(template_id: str) -> dict[str, Any]:
+def load_preparsed_template_rules(template_id: str, template_key: str | None = None) -> dict[str, Any]:
     """从模板库读取后台入库时已完成的结构化解析结果。"""
-    template = get_template_by_id(template_id)
+    template = get_template_by_key(template_key, template_id)
     if not template:
         raise ValueError(f"未找到模板分类：{template_id}")
     references = [item for item in load_template_references(template["id"], template["sourceDir"])
@@ -68,25 +68,31 @@ def parse_reference_templates(paths: list[Path]) -> dict[str, Any]:
 
 def run_writing_skill(*, prompt: str, material_paths: list[Path], template_paths: list[Path],
                       request_url: str, api_key: str, model_name: str,
-                      template_id: str | None, temperature: float, speed_mode: str,
+                      template_id: str | None, template_key: str | None = None,
+                      temperature: float, speed_mode: str,
                       strict_reference_isolation: bool = False,
-                      template_rules: dict[str, Any] | None = None) -> dict[str, Any]:
+                      allow_degradation: bool = False,
+                      template_rules: dict[str, Any] | None = None,
+                      text_materials: list[dict[str, str]] | None = None) -> dict[str, Any]:
     """由调度器调用的唯一写作入口。"""
     template_rules = template_rules if template_rules is not None else parse_reference_templates(template_paths)
     # 用户 prompt 只保留写作要求，不把范文结构/原文痕迹拼进去。
     # 体例坐标由 generate_documents → select_reference → reference_structure_payload 注入，
     # 避免材料润色/范文匹配把模板文件内容误当成上传材料。
-    user_prompt = (prompt or "根据上传材料生成正式公文").strip()
+    user_prompt = (prompt or "根据材料生成正式公文").strip()
     result = generate_documents(
         prompt=user_prompt,
         upload_paths=material_paths,
+        text_materials=text_materials or [],
         request_url=request_url,
         api_key=api_key,
         model_name=model_name,
         template_id=template_id,
+        template_key=template_key,
         temperature=temperature,
         speed_mode=speed_mode,
         strict_reference_isolation=strict_reference_isolation,
+        allow_degradation=allow_degradation,
         format_output=False,
     )
     result["templateRules"] = {

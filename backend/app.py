@@ -42,16 +42,31 @@ from ai_writer import (
     SUPPORTED_INPUT_SUFFIXES,
     build_upload_temp_path,
     generate_documents,
-    get_template_by_id,
-    guess_template_id,
     get_model_config,
+    delete_template_category,
+    delete_template_file,
+    resolve_template_upload_target,
+    write_category_meta,
     public_template_view,
+    resolve_writing_prompt,
+    split_dialog_prompt_and_material,
     safe_extract_text,
     save_model_config,
     scan_template_library,
     sync_template_library,
 )
 from gongwen_workflow import attach_export_records, get_workflow_task, run_workflow
+from proofread import (
+    MAX_PROOFREAD_UPLOAD,
+    PROOFREAD_SUFFIXES,
+    create_session as create_proofread_session,
+    export_session as export_proofread_session,
+    get_session as get_proofread_session,
+    public_session as public_proofread_session,
+    persist_session as persist_proofread_session,
+    run_proofread_with_model,
+    update_session_paragraphs,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMP_DIR = BASE_DIR / "temp"
@@ -84,6 +99,14 @@ class AiModelConfigRequest(BaseModel):
     api_key: str = ""
     model_name: str = ""
     models: list[str] | None = None
+
+
+class ProofreadFromPlatformRequest(BaseModel):
+    file_id: str
+
+
+class ProofreadExportRequest(BaseModel):
+    paragraphs: list[dict] | None = None
 
 
 def cleanup_old_files(max_age_minutes: int = 30):
@@ -477,7 +500,15 @@ def render_docx_to_pdf(docx_path: Path) -> dict:
 # ── API ──
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    from ai_writer import MIN_DRAFT_CHARS, MIN_OUTPUT_LIMIT_CHARS, MAX_DRAFT_CHARS
+    return {
+        "status": "ok",
+        "aiWriterLimits": {
+            "minDraftChars": MIN_DRAFT_CHARS,
+            "minOutputLimitChars": MIN_OUTPUT_LIMIT_CHARS,
+            "maxDraftChars": MAX_DRAFT_CHARS,
+        },
+    }
 
 
 @app.get("/api/config")
@@ -523,10 +554,31 @@ def _unique_target_path(directory: Path, filename: str) -> Path:
     return candidate
 
 
+@app.get("/api/ai/templates/catalog")
+async def get_ai_template_catalog():
+    """返回文种目录，供新建模板分类时选择。"""
+    catalog = get_template_catalog()
+    return {
+        "success": True,
+        "catalog": [
+            {
+                "id": item["id"],
+                "label": item["label"],
+                "description": item.get("description") or "",
+            }
+            for item in catalog
+            if item.get("id") != "generic"
+        ],
+    }
+
+
 @app.post("/api/ai/templates/upload")
 async def upload_ai_templates(
     files: list[UploadFile] = File(...),
     template_id: str = Form(default=""),
+    source_dir: str = Form(default=""),
+    category_name: str = Form(default=""),
+    category_mode: str = Form(default="existing"),
 ):
     saved = []
     skipped = []
@@ -543,32 +595,47 @@ async def upload_ai_templates(
 
         probe_path = None
         probe_text = ""
-        if not template_id and suffix in SUPPORTED_INPUT_SUFFIXES:
+        if suffix in SUPPORTED_INPUT_SUFFIXES:
             probe_path = TEMP_DIR / f"{uuid.uuid4().hex}{suffix}"
             with open(probe_path, "wb") as f:
                 f.write(content)
             probe_text, _ = safe_extract_text(probe_path, limit=6000)
-        resolved_template_id = template_id or guess_template_id(probe_text or filename, filename)
-        if probe_path:
-            _delete_file(probe_path)
-        if resolved_template_id == "generic":
-            skipped.append({"filename": filename, "reason": "自动判断无法识别文种，请选择具体模板后上传"})
+        try:
+            target_dir, resolved_template_id, category_display = resolve_template_upload_target(
+                template_id=template_id,
+                source_dir=source_dir,
+                category_name=category_name,
+                category_mode=category_mode,
+                probe_text=probe_text or filename,
+                probe_filename=filename,
+            )
+        except ValueError as exc:
+            if probe_path:
+                _delete_file(probe_path)
+            skipped.append({"filename": filename, "reason": str(exc)})
             continue
-        template = get_template_by_id(resolved_template_id)
-        if not template:
-            skipped.append({"filename": filename, "reason": f"未找到模板类别 {resolved_template_id}"})
-            continue
+        finally:
+            if probe_path:
+                _delete_file(probe_path)
 
-        target_dir = Path(template["sourceDir"])
         target_dir.mkdir(parents=True, exist_ok=True)
-        target_path = _unique_target_path(target_dir, filename)
+        exact_path = target_dir / filename
+        if exact_path.exists():
+            skipped.append({
+                "filename": filename,
+                "reason": "该分类下已存在同名文件，请勿重复上传",
+            })
+            continue
+        target_path = exact_path
         with open(target_path, "wb") as f:
             f.write(content)
+        write_category_meta(target_dir, resolved_template_id, category_display)
         saved.append(target_path.name)
         assignments.append({
             "filename": target_path.name,
             "templateId": resolved_template_id,
-            "templateName": template.get("name") or template.get("label") or resolved_template_id,
+            "templateName": category_display,
+            "sourceDir": str(target_dir),
         })
 
     if not saved and skipped:
@@ -583,6 +650,32 @@ async def upload_ai_templates(
         "assignments": assignments,
         "skipped": skipped,
         "count": len(saved),
+        "templates": [public_template_view(item) for item in templates],
+    }
+
+
+@app.delete("/api/ai/templates/file")
+async def remove_ai_template_file(source_dir: str, filename: str):
+    try:
+        delete_template_file(source_dir, filename)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    templates = sync_template_library(enrich_structures=False)
+    return {
+        "success": True,
+        "templates": [public_template_view(item) for item in templates],
+    }
+
+
+@app.delete("/api/ai/templates/category")
+async def remove_ai_template_category(source_dir: str):
+    try:
+        delete_template_category(source_dir)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    templates = sync_template_library(enrich_structures=False)
+    return {
+        "success": True,
         "templates": [public_template_view(item) for item in templates],
     }
 
@@ -609,15 +702,18 @@ async def generate_ai_document(
     template_files: list[UploadFile] = File(default=[]),
     material_files: list[UploadFile] = File(default=[]),
     prompt: str = Form(default=""),
+    material_text: str = Form(default=""),
     request_url: str = Form(default=""),
     api_key: str = Form(default=""),
     model_name: str = Form(default=""),
     template_id: str | None = Form(default=None),
+    template_key: str | None = Form(default=None),
     temperature: float = Form(default=0.2),
     speed_mode: str = Form(default="standard"),
     strict_reference_isolation: str = Form(default="false"),
+    allow_degradation: str = Form(default="false"),
 ):
-    """根据上传材料、用户要求和模板库生成带公文格式的 docx。"""
+    """根据上传材料、对话框文本/写作要求与模板库生成带公文格式的 docx。"""
     model_config = get_model_config()
     resolved_request_url = request_url.strip() or str(model_config.get("requestUrl") or "")
     resolved_api_key = api_key.strip()
@@ -634,6 +730,32 @@ async def generate_ai_document(
     if len(effective_material_files) > MAX_UPLOAD_BATCH:
         raise HTTPException(400, detail=f"单次最多上传 {MAX_UPLOAD_BATCH} 个材料文件")
     strict_mode = str(strict_reference_isolation).strip().lower() in {"1", "true", "yes", "on"}
+    allow_degradation_mode = str(allow_degradation).strip().lower() in {"1", "true", "yes", "on"}
+    prompt_text = (prompt or "").strip()
+    dialog_material = (material_text or "").strip()
+    # 无独立 material_text 时，尝试从对话框解析【写作要求】+【材料】
+    if not dialog_material and prompt_text and not effective_material_files:
+        split_prompt, split_material = split_dialog_prompt_and_material(prompt_text)
+        if split_material:
+            prompt_text = split_prompt or prompt_text
+            dialog_material = split_material
+            if split_prompt:
+                prompt_text = split_prompt
+    text_materials: list[dict[str, str]] = []
+    if dialog_material:
+        text_materials.append({"name": "对话框材料.txt", "text": dialog_material})
+    elif not effective_material_files and prompt_text:
+        # 纯短提示且无材料：仍可作为文本材料入口（兼容旧用法）
+        text_materials.append({"name": "对话框材料.txt", "text": prompt_text})
+    if not effective_material_files and not text_materials:
+        raise HTTPException(400, detail="请上传材料文件，或在对话框填写写作要求/粘贴文本材料")
+    # 用户定制提示优先；空提示时使用默认创作指引
+    writing_prompt = resolve_writing_prompt(
+        prompt_text,
+        [item["text"] for item in text_materials],
+    )
+    if not writing_prompt:
+        writing_prompt = resolve_writing_prompt("", [item["text"] for item in text_materials])
     try:
         for file in [*template_files, *effective_material_files]:
             filename = Path(file.filename or "").name
@@ -665,16 +787,19 @@ async def generate_ai_document(
             return documents
 
         result = run_workflow(
-            prompt=prompt,
+            prompt=writing_prompt,
             material_paths=saved_paths,
+            text_materials=text_materials,
             template_paths=saved_template_paths,
             request_url=resolved_request_url,
             api_key=resolved_api_key,
             model_name=resolved_model_name,
-            template_id=template_id,
+            template_id=(template_id or "").strip() or None,
+            template_key=(template_key or "").strip() or None,
             temperature=temperature,
             speed_mode=speed_mode,
             strict_reference_isolation=strict_mode,
+            allow_degradation=allow_degradation_mode,
             export_documents=export_to_converter,
         )
     except HTTPException:
@@ -1045,6 +1170,118 @@ async def clear_files():
     generated_ai_documents.clear()
     _persist_ai_document_registry()
     return {"success": True}
+
+
+@app.post("/api/proofread/from-platform")
+async def proofread_from_platform(payload: ProofreadFromPlatformRequest):
+    """从左侧平台文件列表创建纠错会话（优先使用已处理结果，否则用原文件）。"""
+    file_id = (payload.file_id or "").strip()
+    info = _get_uploaded_file(file_id)
+    if not info:
+        raise HTTPException(404, detail="平台文件不存在或已过期")
+    source_path = None
+    if info.get("processed") and info.get("result_path") and Path(info["result_path"]).exists():
+        source_path = Path(info["result_path"])
+    elif info.get("path") and Path(info["path"]).exists():
+        source_path = Path(info["path"])
+    if not source_path:
+        raise HTTPException(404, detail="平台文件磁盘路径不存在，请重新上传")
+    try:
+        session = create_proofread_session(
+            source_path=source_path,
+            source_name=str(info.get("name") or source_path.name),
+            source_kind="platform",
+            platform_file_id=file_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, detail=f"创建纠错会话失败：{exc}") from exc
+    return session
+
+
+@app.post("/api/proofread/upload")
+async def proofread_upload(file: UploadFile = File(...)):
+    """本地上传文件并创建纠错会话（docx 优先，兼 txt/pdf/图片等）。"""
+    filename = Path(file.filename or "").name
+    suffix = Path(filename).suffix.lower()
+    if not filename or suffix not in PROOFREAD_SUFFIXES:
+        raise HTTPException(
+            400,
+            detail="不支持的文件类型。请上传 docx/txt/pdf/图片，或 wps/ofd（后者建议先转 docx）",
+        )
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, detail="文件为空")
+    if len(content) > MAX_PROOFREAD_UPLOAD:
+        raise HTTPException(400, detail=f"文件超过 {MAX_PROOFREAD_UPLOAD // (1024 * 1024)}MB 上限")
+    fpath = build_upload_temp_path(TEMP_DIR, filename, suffix=suffix)
+    fpath.write_bytes(content)
+    try:
+        session = create_proofread_session(
+            source_path=fpath,
+            source_name=filename,
+            source_kind="local",
+            platform_file_id=None,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, detail=f"创建纠错会话失败：{exc}") from exc
+    return session
+
+
+@app.get("/api/proofread/session/{session_id}")
+async def proofread_get_session(session_id: str):
+    try:
+        session = get_proofread_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+    return public_proofread_session(session)
+
+
+@app.post("/api/proofread/session/{session_id}/run")
+async def proofread_run(session_id: str):
+    try:
+        session = get_proofread_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+    session["status"] = "running"
+    persist_proofread_session(session)
+    try:
+        issues, meta = run_proofread_with_model(session.get("paragraphs") or [])
+        session["issues"] = issues
+        session["meta"] = meta
+        session["status"] = "done"
+        if meta.get("warning"):
+            warnings = list(session.get("warnings") or [])
+            warnings.append(str(meta["warning"]))
+            session["warnings"] = warnings
+        persist_proofread_session(session)
+    except Exception as exc:
+        session["status"] = "ready"
+        session["meta"] = {"error": str(exc)}
+        persist_proofread_session(session)
+        raise HTTPException(500, detail=f"纠错失败：{exc}") from exc
+    return public_proofread_session(session)
+
+
+@app.post("/api/proofread/session/{session_id}/export")
+async def proofread_export(session_id: str, payload: ProofreadExportRequest | None = None):
+    try:
+        session = get_proofread_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+    paragraphs = payload.paragraphs if payload else None
+    if paragraphs is not None:
+        update_session_paragraphs(session, paragraphs)
+    try:
+        path, filename, media = export_proofread_session(session, paragraphs=None)
+    except Exception as exc:
+        raise HTTPException(500, detail=f"导出失败：{exc}") from exc
+    if not path.exists():
+        raise HTTPException(500, detail="导出文件未生成")
+    return FileResponse(path=str(path), filename=filename, media_type=media)
 
 
 if STATIC_DIR.exists():

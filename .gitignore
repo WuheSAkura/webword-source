@@ -19,6 +19,7 @@ backend/temp/
 backend/static/
 backend/template_library.db
 .codex-runlogs/
+_cursor_template_upload_test/
 *.log
 ~$*
 
