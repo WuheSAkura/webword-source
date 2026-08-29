@@ -3,6 +3,7 @@
 流程：上传 → 识别结构(/structure) → 人工校正 → 按校正套格式(/convert) → 预览/下载
 """
 
+import asyncio
 import json
 import re
 import uuid
@@ -45,7 +46,9 @@ from ai_writer import (
     get_model_config,
     delete_template_category,
     delete_template_file,
+    load_templates_from_db,
     resolve_template_upload_target,
+    remove_template_category_from_db,
     write_category_meta,
     public_template_view,
     resolve_writing_prompt,
@@ -535,7 +538,7 @@ async def get_ai_templates():
 
 @app.post("/api/ai/templates/sync")
 async def sync_ai_templates(enrich: bool = False):
-    templates = sync_template_library(enrich_structures=enrich)
+    templates = await asyncio.to_thread(sync_template_library, enrich_structures=enrich)
     return {
         "success": True,
         "count": len(templates),
@@ -642,7 +645,12 @@ async def upload_ai_templates(
         detail = "；".join(f"{item['filename']}：{item['reason']}" for item in skipped[:5])
         raise HTTPException(400, detail=f"没有可收录的模板文件。{detail}")
 
-    templates = sync_template_library(enrich_structures=True)
+    changed_dirs = sorted({item["sourceDir"] for item in assignments if item.get("sourceDir")})
+    templates = await asyncio.to_thread(
+        sync_template_library,
+        True,
+        only_source_dirs=changed_dirs,
+    )
     return {
         "success": True,
         "templateId": template_id or "",
@@ -660,7 +668,11 @@ async def remove_ai_template_file(source_dir: str, filename: str):
         delete_template_file(source_dir, filename)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
-    templates = sync_template_library(enrich_structures=False)
+    templates = await asyncio.to_thread(
+        sync_template_library,
+        False,
+        only_source_dirs=[source_dir],
+    )
     return {
         "success": True,
         "templates": [public_template_view(item) for item in templates],
@@ -671,9 +683,10 @@ async def remove_ai_template_file(source_dir: str, filename: str):
 async def remove_ai_template_category(source_dir: str):
     try:
         delete_template_category(source_dir)
+        remove_template_category_from_db(source_dir)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
-    templates = sync_template_library(enrich_structures=False)
+    templates = load_templates_from_db()
     return {
         "success": True,
         "templates": [public_template_view(item) for item in templates],

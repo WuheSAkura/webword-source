@@ -69,9 +69,9 @@
               type="danger"
               size="small"
               plain
-              :disabled="!manageTemplateKey"
+              :disabled="!manageTemplateKey || !!pendingDelete"
               :loading="deletingCategory"
-              @click="confirmDeleteCategory"
+              @click="requestDeleteCategory"
             >
               删除整个分类
             </el-button>
@@ -82,14 +82,30 @@
               <button
                 type="button"
                 class="delete-file-btn"
-                :disabled="deletingFile === name"
-                @click="deleteOneFile(name)"
+                :disabled="!!pendingDelete || deletingFile === name"
+                @click="requestDeleteFile(name)"
               >
                 {{ deletingFile === name ? '删除中' : '删除' }}
               </button>
             </li>
           </ul>
           <p v-else class="field-hint">该分类下暂无模板文件</p>
+
+          <div v-if="pendingDelete" class="delete-confirm-layer">
+            <div class="delete-confirm-card" role="alertdialog" aria-modal="true">
+              <p class="delete-confirm-text">{{ pendingDelete.message }}</p>
+              <div class="delete-confirm-actions">
+                <el-button @click="pendingDelete = null">取消</el-button>
+                <el-button
+                  type="danger"
+                  :loading="deletingCategory || !!deletingFile"
+                  @click="executePendingDelete"
+                >
+                  删除
+                </el-button>
+              </div>
+            </div>
+          </div>
         </div>
       </template>
 
@@ -135,7 +151,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import {
   deleteAiTemplateCategory,
   deleteAiTemplateFile,
@@ -165,6 +181,7 @@ const uploading = ref(false)
 const loadingTemplates = ref(false)
 const deletingFile = ref('')
 const deletingCategory = ref(false)
+const pendingDelete = ref(null)
 
 function normalizeTemplateList(list) {
   return (list || []).map((item) => ({
@@ -197,6 +214,7 @@ async function handleOpen() {
   categoryMode.value = 'new'
   categoryName.value = ''
   pendingFiles.value = []
+  pendingDelete.value = null
   await loadTemplates()
   selectedTemplateKey.value = localTemplates.value[0]?.templateKey || ''
   manageTemplateKey.value = localTemplates.value[0]?.templateKey || ''
@@ -281,46 +299,42 @@ async function submitUpload() {
   }
 }
 
-async function deleteOneFile(filename) {
-  const category = manageCategory.value
-  if (!category?.sourceDir) return
-  try {
-    await ElMessageBox.confirm(`确定删除文件「${filename}」？`, '删除模板文件', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-      appendTo: document.body,
-    })
-  } catch {
-    return
-  }
-  deletingFile.value = filename
-  try {
-    const res = await deleteAiTemplateFile(category.sourceDir, filename)
-    ElMessage.success('模板文件已删除')
-    emitTemplates(res.data)
-  } catch (err) {
-    ElMessage.error('删除失败：' + (err.response?.data?.detail || err.message))
-  } finally {
-    deletingFile.value = ''
+function requestDeleteFile(filename) {
+  pendingDelete.value = {
+    kind: 'file',
+    filename,
+    message: `确定删除文件「${filename}」？`,
   }
 }
 
-async function confirmDeleteCategory() {
+function requestDeleteCategory() {
   const category = manageCategory.value
-  if (!category?.sourceDir) return
-  try {
-    await ElMessageBox.confirm(
-      `确定删除整个分类「${category.name}」及其全部 ${manageFiles.value.length} 个文件？此操作不可恢复。`,
-      '删除模板分类',
-      {
-        type: 'warning',
-        confirmButtonText: '删除',
-        cancelButtonText: '取消',
-        appendTo: document.body,
-      },
-    )
-  } catch {
+  if (!category) return
+  pendingDelete.value = {
+    kind: 'category',
+    message: `确定删除整个分类「${category.name}」及其全部 ${manageFiles.value.length} 个文件？此操作不可恢复。`,
+  }
+}
+
+async function executePendingDelete() {
+  const pending = pendingDelete.value
+  const category = manageCategory.value
+  if (!pending || !category?.sourceDir) {
+    ElMessage.warning('无法删除：分类信息不完整，请关闭弹窗后重新打开')
+    return
+  }
+  if (pending.kind === 'file') {
+    deletingFile.value = pending.filename
+    try {
+      const res = await deleteAiTemplateFile(category.sourceDir, pending.filename)
+      ElMessage.success('模板文件已删除')
+      emitTemplates(res.data)
+      pendingDelete.value = null
+    } catch (err) {
+      ElMessage.error('删除失败：' + (err.response?.data?.detail || err.message))
+    } finally {
+      deletingFile.value = ''
+    }
     return
   }
   deletingCategory.value = true
@@ -328,6 +342,7 @@ async function confirmDeleteCategory() {
     const res = await deleteAiTemplateCategory(category.sourceDir)
     ElMessage.success('模板分类已删除')
     manageTemplateKey.value = ''
+    pendingDelete.value = null
     emitTemplates(res.data)
   } catch (err) {
     ElMessage.error('删除失败：' + (err.response?.data?.detail || err.message))
@@ -434,10 +449,40 @@ async function confirmDeleteCategory() {
   flex-shrink: 0;
 }
 .manage-panel {
+  position: relative;
   border: 1px solid #e2e8f0;
   border-radius: 12px;
   padding: 14px 16px;
   background: #fafcfe;
+}
+.delete-confirm-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  border-radius: 12px;
+  background: rgba(15, 36, 56, 0.48);
+}
+.delete-confirm-card {
+  width: min(100%, 420px);
+  padding: 20px 22px;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgba(15, 36, 56, 0.18);
+}
+.delete-confirm-text {
+  margin: 0 0 18px;
+  color: #334155;
+  font-size: 15px;
+  line-height: 1.7;
+}
+.delete-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 .manage-head {
   display: flex;

@@ -2477,7 +2477,63 @@ def _build_corpus_profile(references: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def sync_template_library(enrich_structures: bool = False) -> list[dict[str, Any]]:
+def _build_folder_template_entry(
+    folder: Path,
+    catalog_by_label: dict[str, dict[str, Any]],
+    *,
+    enrich_structures: bool = False,
+    model_config: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    files = sorted([
+        item for item in folder.iterdir()
+        if item.is_file()
+        and not item.name.startswith("~$")
+        and item.suffix.lower() in REFERENCE_SUFFIXES
+    ], key=lambda item: item.name)
+    provisional_id = resolve_category_template_id(folder)
+    references = [
+        _ingest_reference(
+            path, provisional_id,
+            enrich_with_ai=enrich_structures,
+            model_config=model_config,
+        )
+        for path in files
+    ]
+    template_id = resolve_category_template_id(folder, references)
+    catalog_item = next((v for v in catalog_by_label.values() if v["id"] == template_id), None)
+    for reference in references:
+        reference["templateId"] = template_id
+    ready = [item for item in references if item["status"] == "ready"]
+    corpus_profile = _build_corpus_profile(references)
+    sample = ready[0] if ready else None
+    template = {
+        "id": template_id,
+        "name": folder.name,
+        "label": catalog_item["label"] if catalog_item else folder.name,
+        "fileCount": len(files),
+        "sourceDir": str(folder),
+        "sampleFile": sample["filename"] if sample else "",
+        "samplePath": sample["filePath"] if sample else "",
+        "sampleText": sample["text"] if sample else "",
+        "files": [item.name for item in files],
+        "corpusProfile": corpus_profile,
+    }
+    return template, references
+
+
+def remove_template_category_from_db(source_dir: str) -> None:
+    init_template_db()
+    resolved = str(Path(source_dir).resolve())
+    with sqlite3.connect(TEMPLATE_DB_PATH) as conn:
+        conn.execute("DELETE FROM template_references WHERE source_dir = ?", (resolved,))
+        conn.execute("DELETE FROM document_templates WHERE source_dir = ?", (resolved,))
+
+
+def sync_template_library(
+    enrich_structures: bool = False,
+    *,
+    only_source_dirs: list[str] | None = None,
+) -> list[dict[str, Any]]:
     init_template_db()
     catalog_by_label = {item["label"]: item for item in get_template_catalog()}
     templates: list[dict[str, Any]] = []
@@ -2486,48 +2542,37 @@ def sync_template_library(enrich_structures: bool = False) -> list[dict[str, Any
     if not TEMPLATE_SOURCE_DIR.exists():
         return load_templates_from_db()
 
-    for folder in sorted([p for p in TEMPLATE_SOURCE_DIR.iterdir() if p.is_dir()], key=lambda p: p.name):
-        files = sorted([
-            item for item in folder.iterdir()
-            if item.is_file()
-            and not item.name.startswith("~$")
-            and item.suffix.lower() in REFERENCE_SUFFIXES
-        ], key=lambda item: item.name)
-        provisional_id = resolve_category_template_id(folder)
-        references = [
-            _ingest_reference(
-                path, provisional_id,
-                enrich_with_ai=enrich_structures,
-                model_config=model_config,
-            )
-            for path in files
-        ]
-        template_id = resolve_category_template_id(folder, references)
-        catalog_item = next((v for v in catalog_by_label.values() if v["id"] == template_id), None)
-        for reference in references:
-            reference["templateId"] = template_id
-        ready = [item for item in references if item["status"] == "ready"]
-        corpus_profile = _build_corpus_profile(references)
-        sample = ready[0] if ready else None
+    scoped_dirs = {
+        str(Path(item).resolve())
+        for item in (only_source_dirs or [])
+        if str(item or "").strip()
+    }
+    all_folders = sorted([p for p in TEMPLATE_SOURCE_DIR.iterdir() if p.is_dir()], key=lambda p: p.name)
+    folders = [
+        folder for folder in all_folders
+        if not scoped_dirs or str(folder.resolve()) in scoped_dirs
+    ]
+
+    for folder in folders:
+        template, references = _build_folder_template_entry(
+            folder,
+            catalog_by_label,
+            enrich_structures=enrich_structures,
+            model_config=model_config,
+        )
+        templates.append(template)
         all_references.extend(references)
-        templates.append({
-            "id": template_id,
-            "name": folder.name,
-            "label": catalog_item["label"] if catalog_item else folder.name,
-            "fileCount": len(files),
-            "sourceDir": str(folder),
-            "sampleFile": sample["filename"] if sample else "",
-            "samplePath": sample["filePath"] if sample else "",
-            "sampleText": sample["text"] if sample else "",
-            "files": [item.name for item in files],
-            "corpusProfile": corpus_profile,
-        })
 
     from datetime import datetime
     now = datetime.now().isoformat(timespec="seconds")
     with sqlite3.connect(TEMPLATE_DB_PATH) as conn:
-        conn.execute("DELETE FROM template_references")
-        conn.execute("DELETE FROM document_templates")
+        if scoped_dirs:
+            for source_dir in scoped_dirs:
+                conn.execute("DELETE FROM template_references WHERE source_dir = ?", (source_dir,))
+                conn.execute("DELETE FROM document_templates WHERE source_dir = ?", (source_dir,))
+        else:
+            conn.execute("DELETE FROM template_references")
+            conn.execute("DELETE FROM document_templates")
         conn.executemany(
             """
             INSERT INTO document_templates (
